@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv
+
+# Data: corpus, datasets, index and outputs are provided/generated at evaluation
+# Ignores everything under data/ but keeps the folder layout (.gitkeep files).
+#data/**
+#!data/**/
+#!data/**/.gitkeep
+data/raw/*
+!data/raw/.gitkeep
+
+# Local material, not part of the submission
+#en.subject.pdf
+#guia/
+moulinette*

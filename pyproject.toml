@@ -1,0 +1,36 @@
+[project]
+name = "rag-against-the-machine"
+version = "0.1.0"
+description = "Retrieval-Augmented Generation over the vLLM codebase"
+readme = "README.md"
+authors = [
+    { name = "saperez-", email = "samuelperleo@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fire>=0.7.1",
+    "pydantic>=2.13.5",
+    "tqdm>=4.70.1",
+]
+
+# Development-only dependencies (installed by `uv sync`).
+[dependency-groups]
+dev = [
+    "flake8>=7.0",
+    "mypy>=1.8",
+    "pytest>=8.0",
+]
+
+[tool.uv]
+# The project runs via `uv run python -m src`; it is not installed as a package.
+package = false
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+ignore_missing_imports = true
+# `mypy .` must only check our code, not the vLLM corpus under data/.
+exclude = ['^\.venv/', '^data/', '^build/', '^dist/']
