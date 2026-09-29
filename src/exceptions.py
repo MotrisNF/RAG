@@ -32,3 +32,21 @@ class DatasetError(RagError):
             where = ".".join(str(p) for p in err["loc"]) or "<root>"
             lines.append(f"  {where}: {err['msg']}")
         super().__init__("\n".join(lines))
+
+
+class ArgError(RagError):
+    """A command-line argument was rejected by validation."""
+
+    def __init__(self, error: ValidationError) -> None:
+        """Build the message as one ``value: message`` line per error.
+
+        Fire passes arguments by position, so ``loc`` holds a number instead
+        of the argument name; the received value is shown instead.
+
+        Args:
+            error: The original pydantic error.
+        """
+        lines = ["Invalid arguments:"]
+        for err in error.errors():
+            lines.append(f"  '{err['input']}': {err['msg']}")
+        super().__init__("\n".join(lines))

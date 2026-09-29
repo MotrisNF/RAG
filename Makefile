@@ -24,9 +24,12 @@ lint:
 lint-strict:
 	uv run -m flake8 && uv run -m mypy --strict .
 
+test:
+	uv run pytest
+
 clean:
 	@find . -path ./.venv -prune -o -type d -name '__pycache__' -exec rm -rf {} +
 	@rm -rf .mypy_cache .pytest_cache
 	@echo "Cache cleaned"
 
-.PHONY: all install run debug lint lint-strict clean
+.PHONY: all install run debug lint lint-strict test clean
