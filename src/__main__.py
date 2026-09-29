@@ -1,9 +1,10 @@
 """Entry point for ``uv run python -m src <command>``."""
+from pydantic import ValidationError  # noqa: F401
 
 
 def main() -> None:
     """Run the command-line interface."""
-    print("RAG against the machine: CLI not implemented yet.")
+    print("Working on it!")
 
 
 if __name__ == "__main__":
