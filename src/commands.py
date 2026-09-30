@@ -206,12 +206,11 @@ class RagCLI:
         bm25 = BM25Index.load(Path(index_dir))
         text = Path(dataset_path).read_text(encoding="utf-8")
         dataset = RagDataset.model_validate_json(text)
-        question = UnansweredQuestion(question=query)
-        results = StudentSearchResults(
-            search_results=[self._search_question(bm25, question, k)],
-            k=k,
-        )
-        raise NotImplementedError("search_dataset is not implemented yet")
+
+        results_list: list[MinimalSearchResults] = []
+        for question in dataset.rag_questions:
+            results_list.append(self._search_question(bm25, question, k))
+        output = StudentSearchResults(search_results=results_list, k=k)
 
     @CliCommand.validated
     def answer(
