@@ -22,6 +22,7 @@ class TestValidArguments:
     @pytest.mark.parametrize("command", [
         ["index"],
         ["index", "--max_chunk_size", "500"],
+        ["index", "--raw_dir", "data/raw"],
         ["search", "How to use LoRA?"],
         ["search", "How to use LoRA?", "--k", "5"],
         ["search", "How to use LoRA?", "--k=5"],
@@ -39,8 +40,15 @@ class TestValidArguments:
          "--dataset_path", DOCS_ANSWERED, "--k", "5"],
     ])
     def test_accepted(self, command: list[str]) -> None:
-        """Fire runs the command and pydantic accepts every value."""
-        fire.Fire(RagCLI, command=command)
+        """Fire runs the command and pydantic accepts every value.
+
+        Commands not written yet raise ``NotImplementedError`` from their
+        body: reaching the body means validation already passed.
+        """
+        try:
+            fire.Fire(RagCLI, command=command)
+        except NotImplementedError:
+            pass
 
 
 class TestInvalidValues:
@@ -76,9 +84,11 @@ class TestInvalidValues:
          "--dataset_path", DOCS_ANSWERED],
         ["evaluate", "--student_search_results_path", DOCS_DATASET,
          "--dataset_path", MISSING_FILE],
-        # Empty output directory
+        # Empty directories
         ["search_dataset", "--dataset_path", DOCS_DATASET,
          "--save_directory", ""],
+        ["index", "--raw_dir", ""],
+        ["index", "--raw_dir", "   "],
     ])
     def test_rejected(self, command: list[str]) -> None:
         """pydantic raises ``ValidationError``."""
@@ -99,10 +109,30 @@ class TestWrongUsage:
         ["search_dataset"],
         ["answer_dataset"],
         ["evaluate", "--dataset_path", DOCS_ANSWERED],
-        ["search", "hola", "--unknown_flag", "5"],
         ["not_a_command"],
     ])
     def test_usage_error(self, command: list[str]) -> None:
         """Fire exits with a usage error."""
         with pytest.raises(SystemExit):
             fire.Fire(RagCLI, command=command)
+
+
+class TestUnknownFlag:
+    """Known Fire behaviour: an unknown flag is reported only AFTER the
+    command has run (Fire calls the method with the arguments it
+    understood, then fails on the leftover ones).
+    """
+
+    def test_command_runs_before_usage_error(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The method is called once, then Fire exits with code 2."""
+        calls: list[tuple[str, int]] = []
+
+        def spy(self: RagCLI, query: str, k: int = 10) -> None:
+            calls.append((query, k))
+
+        monkeypatch.setattr(RagCLI, "search", spy)
+        with pytest.raises(SystemExit) as info:
+            fire.Fire(RagCLI, command=["search", "hola", "--unknown", "5"])
+        assert info.value.code == 2
+        assert calls == [("hola", 10)]

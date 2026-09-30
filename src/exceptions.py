@@ -50,3 +50,8 @@ class ArgError(RagError):
         for err in error.errors():
             lines.append(f"  '{err['input']}': {err['msg']}")
         super().__init__("\n".join(lines))
+
+
+class CorpusError(RagError):
+    def __init__(self, msg: str = "Something failed reading the corpus."):
+        super().__init__(msg)

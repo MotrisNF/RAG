@@ -9,6 +9,10 @@ class MinimalSource(BaseModel):
     last_character_index: int
 
 
+class Chunk(MinimalSource):
+    text: str
+
+
 class UnansweredQuestion(BaseModel):
     question_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     question: str
@@ -41,3 +45,17 @@ class StudentSearchResults(BaseModel):
 class StudentSearchResultsAndAnswer(BaseModel):
     search_results: list[MinimalAnswer]
     k: int
+
+
+class Document(BaseModel):
+    file_path: str
+    text: str
+
+
+class CorpusReadResult(BaseModel):
+    documents: list[Document]
+    skipped: list[str]
+
+    @property
+    def found(self) -> int:
+        return len(self.documents) + len(self.skipped)

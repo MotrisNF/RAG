@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.commands import RagCLI
-from src.exceptions import ArgError, DatasetError, RagError
+from src.exceptions import ArgError, CorpusError, DatasetError, RagError
 from src.models import RagDataset, UnansweredQuestion
 
 
@@ -118,3 +118,21 @@ class TestArgError:
         error = ErrorFactory.from_cli(["search", "hola", "--k", "0"])
         with pytest.raises(RagError):
             raise ArgError(error) from error
+
+
+class TestCorpusError:
+    """Errors of the corpus reader."""
+
+    def test_default_message(self) -> None:
+        """Without arguments it has a generic message."""
+        assert str(CorpusError()) != ""
+
+    def test_custom_message(self) -> None:
+        """The message given is the one shown."""
+        assert str(CorpusError("Corpus folder not found")) == \
+            "Corpus folder not found"
+
+    def test_caught_as_rag_error(self) -> None:
+        """``except RagError`` catches it."""
+        with pytest.raises(RagError):
+            raise CorpusError("boom")

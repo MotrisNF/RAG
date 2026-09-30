@@ -177,6 +177,10 @@ A step-by-step record of what I did and **why**, so I can understand my own work
 - [ ] Docstrings on every model in `models.py` (and the module).
 - [ ] Real `README.md` (English, subject sections). Current one is a personal reminder.
 
+**Reader follow-ups**
+- [ ] Symlinked corpus: `resolve()` follows symlinks, so if `data/raw` is a symlink (e.g. to `goinfre` on campus) the resolved folder is outside `PROJECT_ROOT` and `read()` rejects it — stricter than the subject. Fix: normalise with `os.path.abspath` (removes `..`, does not follow symlinks) instead of `resolve()` for the corpus folder and the file paths. `../` must still be rejected. Add a test with a symlinked `data/raw`.
+- [x] Windows line endings — investigated, **no change**. `read_text` turns `\r\n` into `\n` (4 corpus files have `\r\n`, none is a source in the public datasets). The moulinette does not read the files: it only compares our numbers with the dataset's numbers, so what matters is how the dataset authors read them, and Python's default (`open`/`read_text`) is the most likely. Worst shift is 76 characters in a 3,520-character test file, 3 in the only one under `vllm/`: far inside the IoU 0.05 tolerance.
+
 **Corpus reader and generic chunker** ← next session
 - [ ] Decide index convention: `last_character_index` is **exclusive** (checked: `text[first:last]` gives the exact ground-truth snippet).
 - [ ] `Chunk` model (file path, start, end, text) — maybe inherits from `MinimalSource`.

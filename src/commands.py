@@ -4,9 +4,13 @@ Every public method of ``RagCLI`` is a command:
 ``uv run python -m src <command> [options]``.
 """
 import inspect
+from collections import Counter
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Callable, TypeVar, get_args, get_origin
 
 from pydantic import ConfigDict, Field, FilePath, validate_call
+
+from .reader import CorpusReader
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -62,14 +66,32 @@ class RagCLI:
     @CliCommand.validated
     def index(
             self,
-            max_chunk_size: Annotated[int, Field(gt=0)] = 2000
+            max_chunk_size: Annotated[int, Field(gt=0)] = 2000,
+            raw_dir: Annotated[str, Field(min_length=1)] = "data/raw"
             ) -> None:
         """Chunk the corpus in data/raw/ and save the index in data/processed/.
 
         Args:
             max_chunk_size: Maximum length of a chunk, in characters.
+            raw_dir: Folder with the corpus to index. Relative paths are
+                resolved from the working directory.
         """
-        ...
+        result = CorpusReader(raw_dir).read()
+        characters = sum(len(doc.text) for doc in result.documents)
+        extensions = Counter(
+            PurePosixPath(doc.file_path).suffix for doc in result.documents
+        )
+        print(f"Read {len(result.documents)} of {result.found} files "
+              f"({characters:,} characters) from {raw_dir}")
+        print("  " + " | ".join(
+            f"{ext}: {count}" for ext, count in sorted(extensions.items())
+        ))
+        if result.skipped:
+            print(f"Skipped {len(result.skipped)} unreadable files:")
+            for path in result.skipped:
+                print(f"  {path}")
+        print(f"max_chunk_size = {max_chunk_size} "
+              "(chunking not implemented yet)")
 
     @CliCommand.validated
     def search(
@@ -83,7 +105,7 @@ class RagCLI:
             query: The question to search for.
             k: Number of sources to return.
         """
-        ...
+        raise NotImplementedError("search is not implemented yet")
 
     @CliCommand.validated
     def search_dataset(
@@ -103,7 +125,7 @@ class RagCLI:
             save_directory: Folder where the StudentSearchResults file is
                 written, with the same file name as the dataset.
         """
-        ...
+        raise NotImplementedError("search_dataset is not implemented yet")
 
     @CliCommand.validated
     def answer(
@@ -117,7 +139,7 @@ class RagCLI:
             query: The question to answer.
             k: Number of sources to retrieve as context.
         """
-        ...
+        raise NotImplementedError("answer is not implemented yet")
 
     @CliCommand.validated
     def answer_dataset(
@@ -136,7 +158,7 @@ class RagCLI:
             save_directory: Folder where the StudentSearchResultsAndAnswer
                 file is written, with the same file name as the input.
         """
-        ...
+        raise NotImplementedError("answer_dataset is not implemented yet")
 
     @CliCommand.validated
     def evaluate(
@@ -153,4 +175,4 @@ class RagCLI:
                 (AnsweredQuestions).
             k: Largest k for which recall is reported.
         """
-        ...
+        raise NotImplementedError("evaluate is not implemented yet")
