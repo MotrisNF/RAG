@@ -12,6 +12,7 @@ from typing import (Annotated, Any, Callable, TypeVar, cast, get_args,
 
 from pydantic import (ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
+from tqdm import tqdm
 
 from .bm25_index import BM25Index
 from .chunker import FixedSizeChunker
@@ -208,7 +209,7 @@ class RagCLI:
         dataset = RagDataset.model_validate_json(text)
 
         results_list: list[MinimalSearchResults] = []
-        for question in dataset.rag_questions:
+        for question in tqdm(dataset.rag_questions):
             results_list.append(self._search_question(bm25, question, k))
         output = StudentSearchResults(search_results=results_list, k=k)
 
