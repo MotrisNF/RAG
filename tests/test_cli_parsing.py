@@ -4,10 +4,14 @@ Each test calls Fire exactly as the terminal would, passing the arguments
 as a list. They only check parsing and validation, not what each command
 does.
 """
+from pathlib import Path
+
 import fire
 import pytest
+from src.bm25_index import BM25Index
 from src.commands import RagCLI
 from src.exceptions import ArgError
+from src.models import Chunk
 
 DOCS_DATASET = "data/datasets/UnansweredQuestions/dataset_docs_public.json"
 DOCS_ANSWERED = "data/datasets/AnsweredQuestions/dataset_docs_public.json"
@@ -38,12 +42,20 @@ class TestValidArguments:
         ["evaluate", "--student_search_results_path", DOCS_DATASET,
          "--dataset_path", DOCS_ANSWERED, "--k", "5"],
     ])
-    def test_accepted(self, command: list[str]) -> None:
+    def test_accepted(self, command: list[str], tmp_path: Path) -> None:
         """Fire runs the command and pydantic accepts every value.
 
         Commands not written yet raise ``NotImplementedError`` from their
-        body: reaching the body means validation already passed.
+        body: reaching the body means validation already passed. ``index``
+        saves into a temporary folder, never into ``data/processed``.
         """
+        if command[0] == "index":
+            command = [*command, "--index_dir", str(tmp_path)]
+        if command[0] == "search":
+            chunk = Chunk(file_path="data/raw/a.md", first_character_index=0,
+                          last_character_index=15, text="How to use LoRA")
+            BM25Index.build([chunk]).save(tmp_path)
+            command = [*command, "--index_dir", str(tmp_path)]
         try:
             fire.Fire(RagCLI, command=command)
         except NotImplementedError:

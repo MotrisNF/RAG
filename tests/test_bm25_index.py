@@ -11,12 +11,14 @@ import sys
 import time
 from collections import Counter
 from math import log
+from pathlib import Path
 
 import pytest
 
 from src.bm25_index import BM25Index
 from src.chunker import FixedSizeChunker
-from src.exceptions import IndexBuildError, RagError
+from src.exceptions import (DatasetError, IndexBuildError,
+                            IndexNotFoundError, PathError, RagError)
 from src.models import Chunk, SearchHit
 from src.reader import CorpusReader
 from src.tokenizer_bm import Tokenizer
@@ -315,6 +317,135 @@ class TestSearch:
         first = index.search("the server model openai", 5)
         assert all(index.search("the server model openai", 5) == first
                    for _ in range(5))
+
+
+class TestSaveLoad:
+    """Persisting the index between ``index`` and the search commands."""
+
+    TEXTS = ["Load a LoRA adapter at runtime.",
+             "Configure the OpenAI compatible server.",
+             "The server, the server, the server.",
+             "---"]
+
+    @pytest.fixture
+    def index(self) -> BM25Index:
+        """A small index to save."""
+        return BM25Index.build(make_chunks(*self.TEXTS))
+
+    def test_file_created(self, index: BM25Index, tmp_path: Path) -> None:
+        """``save`` writes ``FILE_NAME`` inside the folder."""
+        index.save(tmp_path)
+        assert (tmp_path / BM25Index.FILE_NAME).is_file()
+
+    def test_creates_missing_folders(self, index: BM25Index,
+                                     tmp_path: Path) -> None:
+        """Nested folders that do not exist yet are created."""
+        target = tmp_path / "a" / "b" / "c"
+        index.save(target)
+        assert (target / BM25Index.FILE_NAME).is_file()
+
+    def test_valid_json(self, index: BM25Index, tmp_path: Path) -> None:
+        """The file is JSON with the three ``IndexData`` fields."""
+        index.save(tmp_path)
+        data = json.loads((tmp_path / BM25Index.FILE_NAME).read_text(
+            encoding="utf-8"))
+        assert set(data) == {"chunks", "postings", "lengths"}
+
+    def test_round_trip_data(self, index: BM25Index,
+                             tmp_path: Path) -> None:
+        """Loading gives back exactly what was saved (JSON turns the chunk
+        ids into text; loading must turn them back into ``int``).
+        """
+        index.save(tmp_path)
+        loaded = BM25Index.load(tmp_path)
+        assert loaded._chunks == index._chunks
+        assert loaded._postings == index._postings
+        assert loaded._lengths == index._lengths
+        assert loaded._avg_length == index._avg_length
+        assert all(isinstance(chunk_id, int)
+                   for ids in loaded._postings.values() for chunk_id in ids)
+
+    @pytest.mark.parametrize("query", ["lora adapter", "the server",
+                                       "configure openai server", "nothing"])
+    def test_round_trip_search(self, index: BM25Index, tmp_path: Path,
+                               query: str) -> None:
+        """A loaded index answers exactly like the original."""
+        index.save(tmp_path)
+        assert BM25Index.load(tmp_path).search(query, 4) == \
+            index.search(query, 4)
+
+    def test_overwrite(self, tmp_path: Path) -> None:
+        """Saving again replaces the previous index."""
+        BM25Index.build(make_chunks("old text")).save(tmp_path)
+        BM25Index.build(make_chunks("new words")).save(tmp_path)
+        loaded = BM25Index.load(tmp_path)
+        assert loaded.search("new", 1)[0].chunk.text == "new words"
+        assert loaded.search("old", 1) == []
+
+    def test_save_into_a_file(self, index: BM25Index,
+                              tmp_path: Path) -> None:
+        """A file where the folder should be: ``PathError``."""
+        not_a_dir = tmp_path / "file.txt"
+        not_a_dir.write_text("x", encoding="utf-8")
+        with pytest.raises(PathError, match="Cannot use") as info:
+            index.save(not_a_dir)
+        assert isinstance(info.value.__cause__, OSError)
+
+    @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                        reason="root ignores permissions")
+    def test_save_without_permission(self, index: BM25Index,
+                                     tmp_path: Path) -> None:
+        """A read-only folder: ``PathError`` saying why."""
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        try:
+            with pytest.raises(PathError, match="Permission denied"):
+                index.save(locked / "index")
+        finally:
+            locked.chmod(0o700)
+
+    def test_load_missing_folder(self, tmp_path: Path) -> None:
+        """No index yet: tell the user to run ``index`` first."""
+        with pytest.raises(IndexNotFoundError) as info:
+            BM25Index.load(tmp_path / "nothing_here")
+        assert str(info.value) == (
+            f"No index found in '{tmp_path / 'nothing_here'}'. "
+            "Run 'index' first.")
+        assert isinstance(info.value.__cause__, FileNotFoundError)
+
+    def test_load_folder_without_index(self, tmp_path: Path) -> None:
+        """The folder exists but has no index file: same message."""
+        with pytest.raises(IndexNotFoundError, match="Run 'index' first"):
+            BM25Index.load(tmp_path)
+
+    def test_load_from_a_file(self, tmp_path: Path) -> None:
+        """``index_dir`` is a file: ``PathError`` (not "not found")."""
+        not_a_dir = tmp_path / "file.txt"
+        not_a_dir.write_text("x", encoding="utf-8")
+        with pytest.raises(PathError, match="Cannot use"):
+            BM25Index.load(not_a_dir)
+
+    @pytest.mark.parametrize("content", [
+        "",
+        "not json at all",
+        '{"chunks": [,]}',
+        "[1, 2, 3]",
+        '{"chunks": [], "postings": {}}',
+        '{"chunks": [], "postings": {"a": {"x": 1}}, "lengths": []}',
+    ])
+    def test_load_corrupt(self, tmp_path: Path, content: str) -> None:
+        """Broken or foreign content: ``DatasetError`` naming the file."""
+        (tmp_path / BM25Index.FILE_NAME).write_text(content,
+                                                    encoding="utf-8")
+        with pytest.raises(DatasetError) as info:
+            BM25Index.load(tmp_path)
+        assert str(tmp_path / BM25Index.FILE_NAME) in str(info.value)
+
+    def test_errors_are_rag_errors(self, tmp_path: Path) -> None:
+        """``main`` shows all of them without a traceback."""
+        for error in (IndexNotFoundError, PathError, DatasetError):
+            assert issubclass(error, RagError)
 
 
 @pytest.fixture(scope="module")

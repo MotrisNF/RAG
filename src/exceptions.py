@@ -122,3 +122,20 @@ class PathError(RagError):
         """
         reason = error.strerror or type(error).__name__
         super().__init__(f"Cannot use '{path}': {reason}")
+
+
+class IndexNotFoundError(RagError):
+    """There is no saved index to load.
+
+    The usual cause is running a search command before ``index``.
+    """
+
+    def __init__(self, index_dir: str | Path) -> None:
+        """Tell the user where the index was expected and what to do.
+
+        Args:
+            index_dir: Folder where the index should be.
+        """
+        super().__init__(
+            f"No index found in '{index_dir}'. Run 'index' first."
+        )

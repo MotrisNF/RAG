@@ -14,8 +14,10 @@ from pydantic import (ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
 
 from .bm25_index import BM25Index
-from .exceptions import ArgError
 from .chunker import FixedSizeChunker
+from .exceptions import ArgError
+from .models import (MinimalSearchResults, MinimalSource, StudentSearchResults,
+                     RagDataset, UnansweredQuestion)
 from .reader import CorpusReader
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -89,12 +91,19 @@ class RagCLI:
             raw_dir: Annotated[str, Field(min_length=1)] = "data/raw",
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
-        """Read the corpus in raw_dir, chunk it and build the search index.
+        """Read the corpus in raw_dir, build the search index, save it.
+
+        Steps: read the files (CorpusReader), split them into chunks
+        (FixedSizeChunker), build the BM25 index and save it in index_dir,
+        where the search commands load it from.
 
         Args:
-            max_chunk_size: Maximum length of a chunk, in characters.
+            max_chunk_size: Maximum length of a chunk, in characters (the
+                moulinette rejects sources longer than 2000).
             raw_dir: Folder with the corpus to index. Relative paths are
                 resolved from the working directory.
+            index_dir: Folder where the index is saved; created if needed.
+                A previous index there is replaced.
         """
         result = CorpusReader(raw_dir).read()
         characters = sum(len(doc.text) for doc in result.documents)
@@ -117,21 +126,62 @@ class RagCLI:
         print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
         bm25 = BM25Index.build(chunks)
         bm25.save(Path(index_dir))
-        print(f"Ingestion complete! Index saved unde {index_dir}/")
+        print(f"Ingestion complete! Index saved under {index_dir}/")
 
     @CliCommand.validated
     def search(
             self,
             query: Annotated[str, Field(min_length=1)],
-            k: Annotated[int, Field(gt=0)] = 10
+            k: Annotated[int, Field(gt=0)] = 10,
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
-        """Print the top-k sources for a single question.
+        """Print the top-k sources for a single question, as JSON.
+
+        The output is a StudentSearchResults with one entry, the same
+        format search_dataset writes, so both commands behave alike.
 
         Args:
             query: The question to search for.
             k: Number of sources to return.
+            index_dir: Folder where the index command saved the index.
         """
-        raise NotImplementedError("search is not implemented yet")
+        bm25 = BM25Index.load(Path(index_dir))
+        question = UnansweredQuestion(question=query)
+        results = StudentSearchResults(
+            search_results=[self._search_question(bm25, question, k)],
+            k=k,
+        )
+        print(results.model_dump_json(indent=2))
+
+    @staticmethod
+    def _search_question(bm25: BM25Index, question: UnansweredQuestion,
+                         k: int) -> MinimalSearchResults:
+        """Search one question and keep only the source locations.
+
+        Each hit becomes a MinimalSource (file path and character range):
+        the chunk text and the score are not part of the output format.
+
+        Args:
+            bm25: A loaded index.
+            question: The question, with its id.
+            k: Number of sources to retrieve.
+
+        Returns:
+            The question with its ranked sources, best first.
+        """
+        sources = [
+            MinimalSource(
+                file_path=hit.chunk.file_path,
+                first_character_index=hit.chunk.first_character_index,
+                last_character_index=hit.chunk.last_character_index,
+            )
+            for hit in bm25.search(question.question, k)
+        ]
+        return MinimalSearchResults(
+            question_id=question.question_id,
+            question=question.question,
+            retrieved_sources=sources,
+        )
 
     @CliCommand.validated
     def search_dataset(
@@ -141,7 +191,8 @@ class RagCLI:
             save_directory: Annotated[
                 str,
                 Field(min_length=1)
-                ] = "data/output/search_results"
+                ] = "data/output/search_results",
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
         """Search every question of a dataset and save the results as JSON.
 
@@ -150,7 +201,16 @@ class RagCLI:
             k: Number of sources to return per question.
             save_directory: Folder where the StudentSearchResults file is
                 written, with the same file name as the dataset.
+            index_dir: Folder where the index command saved the index.
         """
+        bm25 = BM25Index.load(Path(index_dir))
+        text = Path(dataset_path).read_text(encoding="utf-8")
+        dataset = RagDataset.model_validate_json(text)
+        question = UnansweredQuestion(question=query)
+        results = StudentSearchResults(
+            search_results=[self._search_question(bm25, question, k)],
+            k=k,
+        )
         raise NotImplementedError("search_dataset is not implemented yet")
 
     @CliCommand.validated
