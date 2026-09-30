@@ -26,9 +26,9 @@ class ErrorFactory:
         return info.value
 
     @staticmethod
-    def from_cli(command: list[str]) -> ValidationError:
-        """Run ``command`` through Fire and return the validation error."""
-        with pytest.raises(ValidationError) as info:
+    def from_cli(command: list[str]) -> ArgError:
+        """Run ``command`` through Fire and return the argument error."""
+        with pytest.raises(ArgError) as info:
             fire.Fire(RagCLI, command=command)
         return info.value
 
@@ -89,35 +89,57 @@ class TestDatasetError:
 class TestArgError:
     """Formatting of command-line argument errors."""
 
+    NAMES = ["self", "query", "k"]
+
     def test_header(self) -> None:
         """The first line says the arguments are invalid."""
         error = ErrorFactory.from_cli(["search", "hola", "--k", "0"])
-        lines = str(ArgError(error)).splitlines()
-        assert lines[0] == "Invalid arguments:"
+        assert str(error).splitlines()[0] == "Invalid arguments:"
 
-    def test_shows_value_and_reason(self) -> None:
-        """Each line shows the received value and why it was rejected."""
+    def test_names_option_value_and_reason(self) -> None:
+        """Each line: ``--option 'value': reason``."""
         error = ErrorFactory.from_cli(["search", "hola", "--k", "0"])
-        assert "  '0': Input should be greater than 0" in str(ArgError(error))
+        assert "  --k '0': Input should be greater than 0" in str(error)
 
     def test_missing_file(self) -> None:
-        """A missing input file is reported with its path."""
+        """A missing input file is reported with its option and path."""
         error = ErrorFactory.from_cli(
             ["search_dataset", "--dataset_path", "nope.json"])
-        assert "'nope.json'" in str(ArgError(error))
+        assert "--dataset_path 'nope.json'" in str(error)
 
     def test_several_errors(self) -> None:
         """All invalid arguments are listed, one per line."""
         error = ErrorFactory.from_cli(["search", "", "--k", "abc"])
-        lines = str(ArgError(error)).splitlines()
-        assert len(lines) == 1 + error.error_count()
-        assert error.error_count() == 2
+        lines = str(error).splitlines()
+        assert len(lines) == 3
+        assert lines[1].startswith("  --query ''")
+        assert lines[2].startswith("  --k 'abc'")
+
+    @pytest.mark.parametrize("value", ["", " ", "   "])
+    def test_blank_text(self, value: str) -> None:
+        """Empty or blank text gets a clear reason (pydantic strips it
+        before checking, but reports the original value).
+        """
+        error = ErrorFactory.from_cli(["search", value])
+        assert f"--query '{value}': must not be empty or blank" in str(error)
+
+    def test_option_by_position(self) -> None:
+        """A numeric ``loc`` is turned into the parameter name."""
+        assert ArgError._option((2,), self.NAMES) == "--k"
+
+    def test_option_by_name(self) -> None:
+        """A keyword ``loc`` is used as it is."""
+        assert ArgError._option(("query",), self.NAMES) == "--query"
+
+    @pytest.mark.parametrize("loc", [(), (9,), (-1,)])
+    def test_option_unknown(self, loc: tuple[int, ...]) -> None:
+        """Without a usable position the text is generic."""
+        assert ArgError._option(loc, self.NAMES) == "argument"
 
     def test_caught_as_rag_error(self) -> None:
         """``except RagError`` catches it."""
-        error = ErrorFactory.from_cli(["search", "hola", "--k", "0"])
         with pytest.raises(RagError):
-            raise ArgError(error) from error
+            fire.Fire(RagCLI, command=["search", "hola", "--k", "0"])
 
 
 class TestCorpusError:

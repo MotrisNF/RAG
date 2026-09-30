@@ -3,13 +3,18 @@
 Every public method of ``RagCLI`` is a command:
 ``uv run python -m src <command> [options]``.
 """
+import functools
 import inspect
 from collections import Counter
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Callable, TypeVar, get_args, get_origin
+from typing import (Annotated, Any, Callable, TypeVar, cast, get_args,
+                    get_origin)
 
-from pydantic import ConfigDict, Field, FilePath, validate_call
+from pydantic import (ConfigDict, Field, FilePath, ValidationError,
+                      validate_call)
 
+from .exceptions import ArgError
+from .chunker import FixedSizeChunker
 from .reader import CorpusReader
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -28,32 +33,45 @@ class CliCommand:
         """Validate the arguments with pydantic and show plain types to Fire.
 
         1. ``validate_call`` checks every argument against its annotation
-           (including ``Annotated`` constraints) and raises
-           ``ValidationError`` when one is invalid.
-        2. Fire reads the parameter types from ``__signature__``. A copy of
+           (including ``Annotated`` constraints).
+        2. If an ARGUMENT is invalid, its ``ValidationError`` is turned into
+           an ``ArgError`` that names each option (``--k '0': ...``).
+           Validation errors raised inside the command body (e.g. a broken
+           dataset) are not arguments and are left untouched: they are
+           told apart by their title, which is the method name only for
+           argument errors.
+        3. Fire reads the parameter types from ``__signature__``. A copy of
            the signature without the ``Annotated`` wrapper is stored there,
            so ``--help`` shows ``int`` instead of ``Annotated``. pydantic
            keeps using the original annotations.
-        3. ``validate_call`` adds a ``raw_function`` attribute that Fire
-           would list as a sub-command; it is removed.
 
         Args:
             func: The method to decorate.
 
         Returns:
-            The validating wrapper, with the same type as ``func``.
+            The validating command, with the same type as ``func``.
         """
-        wrapper = validate_call(config=CliCommand.CONFIG)(func)
+        validator = validate_call(config=CliCommand.CONFIG)(func)
         signature = inspect.signature(func)
+        names = list(signature.parameters)
+
+        @functools.wraps(func)
+        def command(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return validator(*args, **kwargs)
+            except ValidationError as e:
+                if e.title != func.__qualname__:
+                    raise
+                raise ArgError(e, names) from e
+
         params = [
             param.replace(annotation=get_args(param.annotation)[0])
             if get_origin(param.annotation) is Annotated else param
             for param in signature.parameters.values()
         ]
-        setattr(wrapper, "__signature__",
+        setattr(command, "__signature__",
                 signature.replace(parameters=params))
-        delattr(wrapper, "raw_function")
-        return wrapper
+        return cast(F, command)
 
 
 class RagCLI:
@@ -69,7 +87,7 @@ class RagCLI:
             max_chunk_size: Annotated[int, Field(gt=0)] = 2000,
             raw_dir: Annotated[str, Field(min_length=1)] = "data/raw"
             ) -> None:
-        """Chunk the corpus in data/raw/ and save the index in data/processed/.
+        """Read the corpus in raw_dir, chunk it and build the search index.
 
         Args:
             max_chunk_size: Maximum length of a chunk, in characters.
@@ -90,8 +108,11 @@ class RagCLI:
             print(f"Skipped {len(result.skipped)} unreadable files:")
             for path in result.skipped:
                 print(f"  {path}")
-        print(f"max_chunk_size = {max_chunk_size} "
-              "(chunking not implemented yet)")
+
+        chunker = FixedSizeChunker(max_chunk_size)
+        chunks = chunker.chunk_documents(result.documents)
+
+        print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
 
     @CliCommand.validated
     def search(

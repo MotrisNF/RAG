@@ -59,3 +59,8 @@ class CorpusReadResult(BaseModel):
     @property
     def found(self) -> int:
         return len(self.documents) + len(self.skipped)
+
+
+class SearchHit(BaseModel):
+    chunk: Chunk
+    score: float

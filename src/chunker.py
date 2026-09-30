@@ -33,7 +33,39 @@ class BaseChunker(ABC):
 
 
 class FixedSizeChunker(BaseChunker):
+    SEPARATORS: tuple[str, ...] = ("\n\n", "\n", " ")
+
+    def _find_cut(self, text: str, start: int, end: int, size: int) -> int:
+        for separator in self.SEPARATORS:
+            position = text.rfind(separator, start, end)
+
+            if position > start + size // 2:
+                return position + len(separator)
+
+        return end
+
     def chunk_document(self, doc: Document) -> list[Chunk]:
-        raise NotImplementedError(
-            "chunk_document is not implemented yet"
-        )
+        text = doc.text
+        size = self._max_chunk_size
+        chunk_list: list[Chunk] = []
+
+        start = 0
+
+        while start < len(text):
+            end = min(start + size, len(text))
+
+            if end < len(text):
+                end = self._find_cut(text, start, end, size)
+
+            chunk = text[start:end]
+            if chunk.strip():
+                chunk_list.append(Chunk(
+                    file_path=doc.file_path,
+                    first_character_index=start,
+                    last_character_index=end,
+                    text=chunk
+                ))
+
+            start = end
+
+        return chunk_list

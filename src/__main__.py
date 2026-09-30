@@ -2,19 +2,28 @@
 import sys
 
 import fire
-from pydantic import ValidationError
 
+from .argv_guard import ArgvGuard
 from .commands import RagCLI
-from .exceptions import ArgError, RagError
+from .exceptions import RagError, UsageError
 
 
 def main() -> None:
-    """Run the command-line interface."""
+    """Run the command-line interface.
+
+    Every error ends here and is printed without a traceback:
+
+    - ``UsageError`` (ArgvGuard): malformed command line → exit 2.
+    - ``RagError`` (ArgError, CorpusError...): its message → exit 1.
+    - Ctrl+C → exit 130.
+    - Anything else is a bug → ``Unexpected error`` → exit 1.
+    """
     try:
-        try:
-            fire.Fire(RagCLI)
-        except ValidationError as e:
-            raise ArgError(e) from e
+        argv = ArgvGuard(RagCLI).check(sys.argv[1:])
+        fire.Fire(RagCLI, command=argv, name="src")
+    except UsageError as e:
+        print(e, file=sys.stderr)
+        sys.exit(2)
     except RagError as e:
         print(e, file=sys.stderr)
         sys.exit(1)

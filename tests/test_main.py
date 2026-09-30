@@ -127,7 +127,7 @@ class TestIndex:
         """``--max_chunk_size`` reaches the command."""
         _, out, _ = runner.run_full("index", "--raw_dir", str(REAL_RAW),
                                     "--max_chunk_size", "500")
-        assert "max_chunk_size = 500" in out
+        assert "(max 500 characters)" in out
 
     def test_custom_raw_dir(self, runner: Runner,
                             monkeypatch: pytest.MonkeyPatch,
@@ -171,7 +171,7 @@ class TestArgumentErrors:
         """An empty query is rejected."""
         code, err = runner.run("search", "")
         assert code == 1
-        assert "at least 1 character" in err
+        assert "--query '': must not be empty or blank" in err
 
     def test_missing_file(self, runner: Runner) -> None:
         """A dataset that does not exist is rejected."""
@@ -196,6 +196,77 @@ class TestUsageErrors:
         """Fire's usage error exits with code 2."""
         code, _ = runner.run(*args)
         assert code == 2
+
+
+class TestCommandNeverRuns:
+    """Malformed command lines stop BEFORE the command runs.
+
+    ``CorpusReader.read`` is replaced by a spy: ``index`` must not touch
+    the corpus in any of these cases.
+    """
+
+    @pytest.fixture
+    def reads(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        """Record every call to ``CorpusReader.read``."""
+        calls: list[str] = []
+
+        def spy(self: CorpusReader) -> None:
+            calls.append("read")
+            raise AssertionError("the corpus was read")
+
+        monkeypatch.setattr(CorpusReader, "read", spy)
+        return calls
+
+    def test_unknown_option(self, runner: Runner, reads: list[str]) -> None:
+        """A typo in an option: exit 2, clear message, nothing read."""
+        code, err = runner.run("index", "--chunk_size", "5")
+        assert code == 2
+        assert "Unknown option '--chunk_size' for 'index'" in err
+        assert "--max_chunk_size" in err
+        assert reads == []
+
+    def test_missing_value(self, runner: Runner, reads: list[str]) -> None:
+        """``--raw_dir`` with no value: exit 2, clear message, nothing read.
+
+        Without the check Fire would pass ``raw_dir=True``.
+        """
+        code, err = runner.run("index", "--max_chunk_size", "10",
+                               "--raw_dir")
+        assert code == 2
+        assert "Option '--raw_dir' of 'index' needs a value" in err
+        assert "True" not in err
+        assert reads == []
+
+    def test_too_many_arguments(self, runner: Runner,
+                                reads: list[str]) -> None:
+        """Extra values: exit 2, nothing read."""
+        code, err = runner.run("index", "1", "data/raw", "extra")
+        assert code == 2
+        assert "Too many arguments for 'index'" in err
+        assert reads == []
+
+    @pytest.mark.parametrize("args", [
+        ("index", "--max_chunk_size", "5", "--help"),
+        ("index", "-h"),
+        ("index", "--help"),
+    ])
+    def test_help(self, runner: Runner, reads: list[str],
+                  args: tuple[str, ...]) -> None:
+        """Help is shown (Fire writes it to stderr) and nothing runs."""
+        code, _, err = runner.run_full(*args)
+        assert code == 0
+        assert "max_chunk_size" in err
+        assert reads == []
+
+    def test_valid_forms_still_run(self, runner: Runner,
+                                   reads: list[str]) -> None:
+        """Fire's alternative spellings reach the command."""
+        for args in (("index", "--max-chunk-size", "5"),
+                     ("index", "-m", "5"),
+                     ("index", "--max_chunk_size=5")):
+            code, _ = runner.run(*args)
+            assert code == 1
+        assert reads == ["read", "read", "read"]
 
 
 class TestErrorHandling:

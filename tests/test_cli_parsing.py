@@ -6,9 +6,8 @@ does.
 """
 import fire
 import pytest
-from pydantic import ValidationError
-
 from src.commands import RagCLI
+from src.exceptions import ArgError
 
 DOCS_DATASET = "data/datasets/UnansweredQuestions/dataset_docs_public.json"
 DOCS_ANSWERED = "data/datasets/AnsweredQuestions/dataset_docs_public.json"
@@ -54,7 +53,7 @@ class TestValidArguments:
 class TestInvalidValues:
     """Values of the right argument but wrong content.
 
-    pydantic must reject them with a ``ValidationError``. Any other
+    pydantic rejects them and the command raises ``ArgError``. Any other
     exception (for example ``TypeError``) makes the test fail.
     """
 
@@ -91,8 +90,8 @@ class TestInvalidValues:
         ["index", "--raw_dir", "   "],
     ])
     def test_rejected(self, command: list[str]) -> None:
-        """pydantic raises ``ValidationError``."""
-        with pytest.raises(ValidationError):
+        """The command raises ``ArgError``."""
+        with pytest.raises(ArgError):
             fire.Fire(RagCLI, command=command)
 
 

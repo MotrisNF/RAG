@@ -7,6 +7,8 @@ import pytest
 from pydantic import Field, FilePath, ValidationError
 
 from src.commands import CliCommand, RagCLI
+from src.exceptions import ArgError
+from src.models import RagDataset
 
 COMMANDS = ["index", "search", "search_dataset", "answer",
             "answer_dataset", "evaluate"]
@@ -75,9 +77,9 @@ class TestValidation:
 
     def test_constraints_enforced(self) -> None:
         """``Field`` constraints still apply."""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ArgError):
             Sample().run("hi", 0)
-        with pytest.raises(ValidationError):
+        with pytest.raises(ArgError):
             Sample().run("")
 
     def test_numbers_to_str(self) -> None:
@@ -87,7 +89,7 @@ class TestValidation:
     def test_strip_whitespace(self) -> None:
         """``str_strip_whitespace``: blank text is empty, hence invalid."""
         assert Sample().run("  hi  ") == "hi|10|None"
-        with pytest.raises(ValidationError):
+        with pytest.raises(ArgError):
             Sample().run("   ")
 
     def test_str_to_int(self) -> None:
@@ -99,10 +101,39 @@ class TestValidation:
         file = tmp_path / "a.json"
         file.write_text("{}", encoding="utf-8")
         assert Sample().run("hi", path=file).endswith(str(file))
-        with pytest.raises(ValidationError):
+        with pytest.raises(ArgError):
             Sample().run("hi", path=tmp_path / "missing.json")
-        with pytest.raises(ValidationError):
+        with pytest.raises(ArgError):
             Sample().run("hi", path=tmp_path)
+
+
+class TestErrors:
+    """What the decorated command raises."""
+
+    def test_names_the_option(self) -> None:
+        """``ArgError`` names each invalid option and its value."""
+        with pytest.raises(ArgError) as info:
+            Sample().run("hi", 0)
+        assert "--k '0': Input should be greater than 0" in str(info.value)
+
+    def test_keeps_cause(self) -> None:
+        """The original ``ValidationError`` is chained."""
+        with pytest.raises(ArgError) as info:
+            Sample().run("")
+        assert isinstance(info.value.__cause__, ValidationError)
+
+    def test_body_errors_untouched(self) -> None:
+        """A ``ValidationError`` raised inside the command is not an
+        argument error: it goes through unchanged.
+        """
+        class Broken:
+            @CliCommand.validated
+            def run(self, k: int = 1) -> None:
+                RagDataset.model_validate({})
+
+        with pytest.raises(ValidationError) as info:
+            Broken().run(3)
+        assert info.value.title == "RagDataset"
 
 
 class TestConfig:
