@@ -1,11 +1,12 @@
 from collections import Counter
 import heapq
 from math import log
+from pathlib import Path
 
 from tqdm import tqdm
 
-from .exceptions import IndexBuildError
-from .models import Chunk, SearchHit
+from .exceptions import IndexBuildError, PathError
+from .models import Chunk, IndexData, SearchHit
 from .tokenizer_bm import Tokenizer
 
 
@@ -96,3 +97,23 @@ class BM25Index:
             hits.append(SearchHit(chunk=self._chunks[chunk_id], score=score))
 
         return hits
+
+    def save(self, index_dir: Path) -> None:
+        try:
+            index_dir.mkdir(parents=True, exist_ok=True)
+
+            index = IndexData(
+                chunks=self._chunks,
+                postings=self._postings,
+                lengths=self._lengths)
+            path = index_dir / "index.json"
+            path.write_text(index.model_dump_json(), encoding="utf-8")
+        except OSError as e:
+            raise PathError(index_dir, e) from e
+
+    @classmethod
+    def load(cls, index_dir: Path) -> "BM25Index":
+        # 1. leer index_dir / "index.json"   (si no existe → error claro)
+        # 2. IndexData.model_validate_json(texto)   (si está roto → error claro)
+        # 3. return cls(data.chunks, data.postings, data.lengths)
+        raise NotImplementedError("load is not implemented yet")

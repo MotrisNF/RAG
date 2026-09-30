@@ -6,13 +6,14 @@ Every public method of ``RagCLI`` is a command:
 import functools
 import inspect
 from collections import Counter
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import (Annotated, Any, Callable, TypeVar, cast, get_args,
                     get_origin)
 
 from pydantic import (ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
 
+from .bm25_index import BM25Index
 from .exceptions import ArgError
 from .chunker import FixedSizeChunker
 from .reader import CorpusReader
@@ -85,7 +86,8 @@ class RagCLI:
     def index(
             self,
             max_chunk_size: Annotated[int, Field(gt=0)] = 2000,
-            raw_dir: Annotated[str, Field(min_length=1)] = "data/raw"
+            raw_dir: Annotated[str, Field(min_length=1)] = "data/raw",
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
         """Read the corpus in raw_dir, chunk it and build the search index.
 
@@ -113,6 +115,9 @@ class RagCLI:
         chunks = chunker.chunk_documents(result.documents)
 
         print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
+        bm25 = BM25Index.build(chunks)
+        bm25.save(Path(index_dir))
+        print(f"Ingestion complete! Index saved unde {index_dir}/")
 
     @CliCommand.validated
     def search(

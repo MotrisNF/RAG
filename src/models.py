@@ -64,3 +64,9 @@ class CorpusReadResult(BaseModel):
 class SearchHit(BaseModel):
     chunk: Chunk
     score: float
+
+
+class IndexData(BaseModel):
+    chunks: list[Chunk]
+    postings: dict[str, dict[int, int]]
+    lengths: list[int]

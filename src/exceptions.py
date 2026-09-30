@@ -1,4 +1,6 @@
 """Exception hierarchy for the RAG project."""
+from pathlib import Path
+
 from pydantic import ValidationError
 from pydantic_core import ErrorDetails
 
@@ -101,3 +103,22 @@ class IndexBuildError(RagError):
     without a single token (e.g. only symbols). Without it the average
     chunk length would be 0 and BM25 would divide by zero.
     """
+
+
+class PathError(RagError):
+    """A file or folder cannot be created, read or written.
+
+    Wraps the ``OSError`` raised by the operating system (missing
+    permissions, a file where a folder was expected, disk full...) into
+    a short message for the user.
+    """
+
+    def __init__(self, path: str | Path, error: OSError) -> None:
+        """Build the message from the path and the system error.
+
+        Args:
+            path: The file or folder that failed.
+            error: The original ``OSError``.
+        """
+        reason = error.strerror or type(error).__name__
+        super().__init__(f"Cannot use '{path}': {reason}")
