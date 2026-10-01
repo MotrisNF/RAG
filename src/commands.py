@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import (Annotated, Any, Callable, TypeVar, cast, get_args,
                     get_origin)
 
-from pydantic import (ConfigDict, Field, FilePath, ValidationError,
+from pydantic import (BaseModel, ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
 from tqdm import tqdm
 
@@ -22,6 +22,7 @@ from .models import (MinimalSearchResults, MinimalSource, StudentSearchResults,
 from .reader import CorpusReader
 
 F = TypeVar("F", bound=Callable[..., Any])
+M = TypeVar("M", bound=BaseModel)
 
 
 class CliCommand:
@@ -155,6 +156,33 @@ class RagCLI:
         print(results.model_dump_json(indent=2))
 
     @staticmethod
+    def _open_file_save(path: Path, model: type[M]) -> M:
+        """Read a JSON file and validate it with a pydantic model.
+
+        Shared by every command that reads a JSON input (datasets, search
+        results), so the two possible failures are handled in one place.
+
+        Args:
+            path: The JSON file to read.
+            model: The model the content must match (e.g. ``RagDataset``).
+
+        Returns:
+            The validated content, as an instance of ``model``.
+
+        Raises:
+            PathError: The file cannot be read, or is not UTF-8 text.
+            DatasetError: The content is not valid JSON for ``model``.
+        """
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise PathError(path, e) from e
+        try:
+            return model.model_validate_json(text)
+        except ValidationError as e:
+            raise DatasetError(str(path), e) from e
+
+    @staticmethod
     def _search_question(bm25: BM25Index, question: UnansweredQuestion,
                          k: int) -> MinimalSearchResults:
         """Search one question and keep only the source locations.
@@ -187,9 +215,7 @@ class RagCLI:
     @CliCommand.validated
     def search_dataset(
             self,
-            dataset_path: FilePath = Path(
-                "data/datasets/UnansweredQuestions/dataset_code_public.json"
-                ),
+            dataset_path: FilePath,
             k: Annotated[int, Field(gt=0)] = 10,
             save_directory: Annotated[
                 str,
@@ -207,14 +233,7 @@ class RagCLI:
             index_dir: Folder where the index command saved the index.
         """
         bm25 = BM25Index.load(Path(index_dir))
-        try:
-            text = dataset_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            raise PathError(dataset_path, e) from e
-        try:
-            dataset = RagDataset.model_validate_json(text)
-        except ValidationError as e:
-            raise DatasetError(str(dataset_path), e) from e
+        dataset = self._open_file_save(dataset_path, RagDataset)
 
         results_list: list[MinimalSearchResults] = []
         for question in tqdm(

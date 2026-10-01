@@ -7,8 +7,8 @@ import pytest
 from pydantic import Field, FilePath, ValidationError
 
 from src.commands import CliCommand, RagCLI
-from src.exceptions import ArgError
-from src.models import RagDataset
+from src.exceptions import ArgError, DatasetError, PathError
+from src.models import RagDataset, StudentSearchResults
 
 COMMANDS = ["index", "search", "search_dataset", "answer",
             "answer_dataset", "evaluate"]
@@ -143,3 +143,57 @@ class TestConfig:
         """The two coercion options are enabled."""
         assert CliCommand.CONFIG.get("coerce_numbers_to_str") is True
         assert CliCommand.CONFIG.get("str_strip_whitespace") is True
+
+
+class TestOpenFileSave:
+    """``RagCLI._open_file_save``: read + validate a JSON input."""
+
+    VALID = '{"rag_questions": [{"question_id": "q1", "question": "hi"}]}'
+
+    def test_returns_model_instance(self, tmp_path: Path) -> None:
+        """Valid content gives an object of the requested model."""
+        path = tmp_path / "d.json"
+        path.write_text(self.VALID, encoding="utf-8")
+        dataset = RagCLI._open_file_save(path, RagDataset)
+        assert isinstance(dataset, RagDataset)
+        assert dataset.rag_questions[0].question_id == "q1"
+
+    def test_other_model(self, tmp_path: Path) -> None:
+        """Works with any model, e.g. search results."""
+        path = tmp_path / "r.json"
+        path.write_text('{"search_results": [], "k": 5}', encoding="utf-8")
+        results = RagCLI._open_file_save(path, StudentSearchResults)
+        assert results.k == 5
+
+    def test_missing_file(self, tmp_path: Path) -> None:
+        """A file that does not exist: ``PathError``."""
+        with pytest.raises(PathError, match="No such file"):
+            RagCLI._open_file_save(tmp_path / "nope.json", RagDataset)
+
+    def test_directory(self, tmp_path: Path) -> None:
+        """A folder instead of a file: ``PathError``."""
+        with pytest.raises(PathError):
+            RagCLI._open_file_save(tmp_path, RagDataset)
+
+    def test_not_utf8(self, tmp_path: Path) -> None:
+        """Bytes that are not UTF-8: ``PathError`` saying so."""
+        path = tmp_path / "bad.json"
+        path.write_bytes(b"\xff\xfe\x00 bad")
+        with pytest.raises(PathError, match="not valid UTF-8"):
+            RagCLI._open_file_save(path, RagDataset)
+
+    @pytest.mark.parametrize("content", ["", "{", '{"rag_questions": [,]}',
+                                         '{"other": []}', "[1, 2]"])
+    def test_invalid_content(self, tmp_path: Path, content: str) -> None:
+        """Broken JSON or wrong shape: ``DatasetError`` naming the file."""
+        path = tmp_path / "d.json"
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(DatasetError, match="d.json"):
+            RagCLI._open_file_save(path, RagDataset)
+
+    def test_wrong_model(self, tmp_path: Path) -> None:
+        """A dataset read as search results is rejected."""
+        path = tmp_path / "d.json"
+        path.write_text(self.VALID, encoding="utf-8")
+        with pytest.raises(DatasetError):
+            RagCLI._open_file_save(path, StudentSearchResults)

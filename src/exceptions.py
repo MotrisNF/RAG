@@ -185,3 +185,8 @@ class IndexNotFoundError(RagError):
         super().__init__(
             f"No index found in '{index_dir}'. Run 'index' first."
         )
+
+
+class EvaluationError(RagError):
+    def __init__(self, error: str) -> None:
+        super().__init__(f"Evaluation error: {error}")
