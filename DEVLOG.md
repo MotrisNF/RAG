@@ -300,54 +300,129 @@ A step-by-step record of what I did and **why**, so I can understand my own work
 
 ---
 
-## 📍 WHERE I STOPPED (2026-10-01)
+## Step 16 — `evaluate` finished, test data, stricter CLI (2026-10-01) · commit `64a048f`
 
-`evaluate` computes everything but **does not print yet** (`evaluation` unused → flake8 F841). Pending:
-1. `EvaluationInform` → pydantic model with public fields (`recall`, `missing`, `unknown`), like `CorpusReadResult`.
-2. Print it in the `evaluate` command: one line per cutoff (`Recall@5: 0.850 (85.0%)`), plus how many questions were missing / unknown (and which, maybe only the first few).
-3. Fix flake8 `E122` in `evaluator.py` (the closing `)` of `return EvaluationInform(...)`).
-4. Tests: 3 tests still expect `evaluate` to be pending (`NotImplementedError`) → update them; add `tests/test_evaluator.py` (IoU cases, found/not found, missing/unknown, cutoffs, errors) and a regression test that reproduces the moulinette numbers (small JSON files in `tests/data/`).
+**What**
+- `evaluate` prints the report: `Student data is valid: True`, recall per cutoff, unknown / missing questions (at most `MAX_IDS_SHOWN = 5`, then `... and N more`), `Found within k=…: X/Y questions`.
+- `evaluate --show_failed`: lists every question not fully found within the first k results, with its text. **Same list as the moulinette's `list_valid_questions`** (checked: 15 docs, 40 code, 3 mini hard).
+- `Evaluator.evaluate` returns `EvaluationInform` (read-only properties `recall`, `missing`, `unknown`, `failed`). `DatasetEvaluationError` / `ResultsEvaluationError`: the command re-raises each one with the path of **its** file.
+- `ArgvGuard`: a first word that is not an option nor a public command → `Unknown command` (Fire would otherwise run private methods like `_print_ids` and print class attributes like `SEPARATOR`).
+- Test data in `tests/data`: a mini corpus (`raw/mini_vllm`, 10 files) and two datasets with exact ranges: `dataset_mini.json` (11 easy) and `dataset_mini_hard.json` (13 hard, each with a `difficulty`: paraphrase, identifier, small-answer, distractor). Real search results of docs/code for a regression test.
+- `make test_rag` (index → search_dataset → evaluate on the mini corpus); options `TEST_DATASET`, `TEST_K`, `TEST_CHUNK`. Generated files in `tests/data/processed` and `tests/data/output` (ignored by git, removed by `make clean`).
+- Docstrings on every module, class and function of `src/` and `tests/` (checked with an AST scan).
+- README: "Commands (copy & paste)" for every command and the moulinette (`--threshold`, `list_valid_questions`).
+- 808 tests passing.
+
+**Learned**
+- Recall@k uses the first k results: an answer in 4th position counts for @5 and @10, not for @1 and @3.
+- Iterating a dict gives its keys; `.items()` gives pairs. Format spec is `{value:.3f}`, not `:f3`.
+- stdout is buffered when it is not a terminal and stderr is not: piped output can look out of order (call `sys.stdout.flush()` before writing errors if needed).
+- Fire only hides `_private` methods from the help; named explicitly, it runs them.
+
+---
+
+## Step 17 — `PyChunker`, dotted terms, path experiment (2026-10-02) · commit `19b43eb`
+
+**What**
+- `PyChunker(FixedSizeChunker)`: only `SEPARATORS` and `CUT_BEFORE`. Prefers to cut right before a definition: `\n@`, `\nclass `, `\ndef `, `\nasync def `, then the indented ones (methods), then `\n\n`, `\n`, space. `CUT_BEFORE` separators cut after their leading newline, so the definition starts the next chunk.
+- One single `_find_cut` in `FixedSizeChunker` (`CUT_BEFORE` empty there): checked that both chunkers give identical chunks on the whole corpus before/after moving it.
+- **Not used yet**: `index` still chunks every file with `FixedSizeChunker`.
+- Tokenizer second pass `COMPLEX_PATTERN` (`[a-z0-9_]+(?:\.[a-z0-9_]+)+`): dotted names are also kept whole (`llm.generate` → `llm`, `generate`, `llm.generate`). Tests updated + 22 new ones (830 passing).
+- Experiment (commented in `BM25Index.build`): also tokenize `chunk.file_path`. 35 of 99 code questions contain words that are only in the path of their file (`keye`, `sampler`, `fused_moe`...).
+
+**Results** (full tables in README → Performance)
+- `PyChunker` vs `FixedSizeChunker` on code: no clear gain. At 2000 chars recall@1 +5 points but recall@5 −5 (gains 1 question, loses 6); at 500 recall@5 +2; at 1000 about the same.
+- Why: 4 of the 6 lost questions still retrieve the right file but another chunk of it ranks first; ground-truth ranges are arbitrary ~880-char windows and IoU ≥ 0.05 is a low bar, so the position of the cuts barely matters. What decides a hit is the words → next levers: path and identifiers in the indexed text.
+- Kept anyway: the subject requires a Python-specific strategy.
+
+**Learned**
+- Measure every change on its own (one at a time, rebuild the index, `evaluate`). With ~100 questions, 1 question ≈ 1 %.
+- A cleaner structure is not always better recall.
+
+---
+
+## 📍 WHERE I STOPPED (2026-10-02)
+
+The **mandatory** retrieval part is not complete yet: the subject requires two distinct chunking strategies.
+1. `MarkdownChunker` for `.md` and `.txt`: another subclass with heading separators (`\n# `, `\n## `, `\n### `...) in `CUT_BEFORE`.
+2. Choose the chunker by extension in `index` (`.py` → `PyChunker`, the rest → Markdown).
+3. Tests for `PyChunker` and `MarkdownChunker` (reuse the `FixedSizeChunker` invariants).
+4. Measure (docs, code, mini hard) and add the rows to README → Performance.
+
+### ⚠️ To study: decorator separated from its `def` (`PyChunker`)
+
+Seen with a small chunk (size 90):
+```python
+class A:
+    """Doc."""
+
+    @property        ← ends the previous chunk
+    def x(self):     ← starts the next one
+```
+**Cause:** `_find_cut` only accepts a separator in the second half of the window (minimum fill). When the decorator falls in the first half and the `def` in the second half, the `\n    @` cut is rejected and the next accepted separator is `\n    def `, so the cut lands between the decorator and its function. It also happens with stacked decorators (`@a\n@b\ndef`), comments right above a `def`, and decorated classes.
+
+**Why it is not trivial:**
+- `rfind` returns the **last** occurrence of each separator, and the separators are tried one by one: the cut does not "know" that the line above the chosen `def` is a decorator.
+- Moving the cut back to before the decorator may break the minimum-fill rule (tiny chunk) or even move it before `start` (no progress → infinite loop).
+- Several decorators, decorators with arguments over several lines (`@app.route(\n    "/x",\n)`) and comments make "the lines above the def" hard to define with simple string matching.
+
+**Options to evaluate:**
+1. After choosing a `def` cut, walk back line by line while the previous line starts with `@` (same indentation) and move the cut there, **only if** it stays after `start + size // 2`; otherwise keep the `def` cut.
+2. Treat "decorators + def" as one block: search the `def` and then extend the cut to the first decorator line above it.
+3. Use `ast`: decorated nodes give `decorator_list` with exact line numbers (needs the syntax-error fallback for the `.buildkite` file).
+4. Accept it: with 2000-character chunks it is rare and, as measured, chunk boundaries barely change recall. Document it in the README.
+
+Whatever is chosen: a test with `@property` / stacked decorators / a decorated class, and the chunker invariants must keep passing (no gaps, never above the max, always progresses).
 
 ---
 
 ## Next steps
 
 **Housekeeping**
-- [x] Docstrings on `models.py`, `reader.py`, `chunker.py`, `tokenizer_bm.py`, `exceptions.py`.
-- [ ] Docstrings on `evaluator.py`.
-- [ ] Real `README.md` (English, subject sections). Current one is a personal reminder.
+- [x] Docstrings on every module, class and function (`src/` and `tests/`).
+- [ ] Real `README.md` (English, subject sections: Description, Instructions, Resources + AI use, System architecture, Chunking strategy, Retrieval method, Performance analysis, Design decisions, Challenges faced, Example usage). Current one is a personal reminder + commands + performance data.
+- [ ] Keep TODOs here (they can be ticked), not only in commit messages.
 
 **Reader follow-ups**
 - [ ] Symlinked corpus: `resolve()` follows symlinks, so if `data/raw` is a symlink (e.g. to `goinfre` on campus) the resolved folder is outside `PROJECT_ROOT` and `read()` rejects it — stricter than the subject. Fix: normalise with `os.path.abspath` (removes `..`, does not follow symlinks) instead of `resolve()` for the corpus folder and the file paths. `../` must still be rejected. Add a test with a symlinked `data/raw`.
 - [x] Windows line endings — investigated, **no change**. `read_text` turns `\r\n` into `\n` (4 corpus files have `\r\n`, none is a source in the public datasets). The moulinette does not read the files: it only compares our numbers with the dataset's numbers, so what matters is how the dataset authors read them, and Python's default (`open`/`read_text`) is the most likely. Worst shift is 76 characters in a 3,520-character test file, 3 in the only one under `vllm/`: far inside the IoU 0.05 tolerance.
 
-**Corpus reader and generic chunker**
+**Chunking (mandatory: two distinct strategies)**
 - [x] Index convention: `last_character_index` is **exclusive**.
-- [x] `Chunk(MinimalSource)` model.
-- [x] `CorpusReader` + tests.
-- [x] `BaseChunker` + `FixedSizeChunker` + tests.
+- [x] `Chunk(MinimalSource)` model, `CorpusReader`, `BaseChunker`, `FixedSizeChunker` + tests.
+- [x] `PyChunker` (cut before definitions); single `_find_cut` with `CUT_BEFORE`.
+- [ ] `MarkdownChunker` (cut before headings) for `.md` / `.txt`.
+- [ ] Choose the chunker by extension in `index`.
+- [ ] Tests for `PyChunker` and `MarkdownChunker`.
+- [ ] Decorator separated from its `def` (see "To study" above).
+- [ ] Maybe: `index --chunking fixed|structural` (default structural) to compare strategies.
 
-**Index and search**
-- [x] Own BM25 index + simple tokenizer + tests.
-- [x] `index` command: read → chunk → build → save (`--raw_dir`, `--index_dir`). ~0.7 s.
-- [x] `search` command (JSON output) + load.
-- [x] `search_dataset` (Step 14).
-- [x] First run of the moulinette → baseline recall in Step 14.
-- [ ] `evaluate` command: computing done and matches the moulinette; **printing + tests pending** (see "Where I stopped").
+**Index, search and evaluation**
+- [x] Own BM25 index + save/load + tests.
+- [x] `index`, `search` (JSON), `search_dataset` + moulinette baseline.
+- [x] `evaluate` (same recall as the moulinette, `--show_failed`) + tests.
+- [x] Mini corpus + datasets in `tests/data`, `make test_rag`.
 
-**Improve recall** (goal: docs ≥ 80 %, code ≥ 50 % recall@5)
-- [ ] `MarkdownChunker` (by headings) and `PythonChunker` (by functions/classes with `ast`; one vLLM file has a syntax error → fall back to `FixedSizeChunker`).
-- [ ] `index --chunking fixed|structural` option (default structural) to compare strategies.
-- [ ] Split identifiers in the tokenizer (keep the whole identifier too: `LoRARequest` splits badly); add file path / headings to the indexed text.
+**Improve recall** (goal: docs ≥ 80 %, code ≥ 50 % recall@5 — met; more margin wanted for code)
+- [x] Tokenizer: dotted names kept whole (`llm.generate`). **Measure it.**
+- [ ] Tokenizer: keep whole `snake_case` identifiers too. Today `max_model_len` → `max`, `model`, `len` only (the whole name is kept only inside a dotted name). Idea: a third pass `[a-z0-9]+(?:_[a-z0-9]+)+`.
+- [ ] File path in the indexed text: code ready but commented in `BM25Index.build`. Uncomment, rebuild, measure.
+- [ ] Section headings / function names in the indexed text (after the structural chunkers).
+- [ ] Save which tokenizer built the index (in `IndexData`) and check it on `load`: a mismatch gives wrong results with no error.
 - [ ] Try excluding `tests/`, `benchmarks/` (dataset code sources are all under `vllm/`).
-- [ ] Try several chunk sizes, overlap, `K1`/`B`, and record the recall of each.
+- [ ] Try chunk sizes, overlap, `K1`/`B`; record every result in README → Performance.
 
-**Generation**
-- [ ] `torch` (CPU) + `transformers`; isolated generator class; chat template without thinking; token budget.
-- [ ] `answer` and `answer_dataset`.
+**Generation (mandatory)**
+- [ ] Install `torch` CPU-only with uv (configured in `pyproject.toml`, so `uv sync` reproduces it) + `transformers`.
+- [ ] Model cache on `goinfre` / `sgoinfre` (check which one on campus) via `HF_HOME`.
+- [ ] `Generator` class in its own module, imported **only** inside `answer` / `answer_dataset` (the other commands must not load torch). Chat template without thinking, token budget, max new tokens, clean output.
+- [ ] `answer` (reuses `_search_question`) and `answer_dataset` (reads results with `_open_file_save`).
+
+**Bonus** (only once the mandatory part is perfect)
+- [ ] Semantic embeddings (`all-MiniLM-L6-v2`), hybrid retrieval (reciprocal rank fusion), incremental indexing, caching, local HTTP API.
 
 **Final**
-- [ ] Edge cases, timings, README, `.gitignore` uncommented before delivery.
+- [ ] Edge cases, timings, README, `.gitignore` uncommented before delivery (no `data/`, PDF, `guia/`).
 
 ---
 

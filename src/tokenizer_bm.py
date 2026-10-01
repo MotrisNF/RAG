@@ -27,7 +27,8 @@ class Tokenizer:
     """
 
     PATTERN = re.compile(r"[a-z0-9]+")
-    COMPLEX_PATTERN = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)+")
+    DOT_PATTERN = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)+")
+    SNAKE_PATERN = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)+")
 
     def tokenize(self, text: str) -> list[str]:
         """Return the terms of ``text``, repetitions included.
@@ -44,4 +45,4 @@ class Tokenizer:
         """
         low_text = text.lower()
         return (self.PATTERN.findall(low_text)
-                + self.COMPLEX_PATTERN.findall(low_text))
+                + self.DOT_PATTERN.findall(low_text))
