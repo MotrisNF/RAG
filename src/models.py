@@ -190,3 +190,25 @@ class IndexData(BaseModel):
         if sum(self.lengths) <= 0:
             raise ValueError("the index has no tokens")
         return self
+
+
+class EvaluationInform:
+    def __init__(self,
+                 recall: dict[int, float],
+                 missing: list[str],
+                 unknown: list[str]) -> None:
+        self._recall = recall
+        self._missing = missing
+        self._unknown = unknown
+
+    @property
+    def recall(self) -> dict[int, float]:
+        return self._recall
+
+    @property
+    def missing(self) -> list[str]:
+        return self._missing
+
+    @property
+    def unknown(self) -> list[str]:
+        return self._unknown

@@ -16,9 +16,11 @@ from tqdm import tqdm
 
 from .bm25_index import BM25Index
 from .chunker import FixedSizeChunker
-from .exceptions import ArgError, DatasetError, PathError
+from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
+                         PathError, ResultsEvaluationError)
+from .evaluator import Evaluator
 from .models import (MinimalSearchResults, MinimalSource, StudentSearchResults,
-                     RagDataset, UnansweredQuestion)
+                     RagDataset, UnansweredQuestion, EvaluationInform)
 from .reader import CorpusReader
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -301,4 +303,22 @@ class RagCLI:
                 (AnsweredQuestions).
             k: Largest k for which recall is reported.
         """
-        raise NotImplementedError("evaluate is not implemented yet")
+
+        dataset = self._open_file_save(
+            dataset_path,
+            RagDataset)
+        retrived = self._open_file_save(
+            student_search_results_path,
+            StudentSearchResults)
+        try:
+            evaluation: EvaluationInform = Evaluator().evaluate(
+                retrived, dataset, k
+            )
+        except DatasetEvaluationError as e:
+            raise DatasetEvaluationError(
+                f"dataset '{dataset_path}': {e.problem}"
+            ) from e
+        except ResultsEvaluationError as e:
+            raise ResultsEvaluationError(
+                f"results '{student_search_results_path}': {e.problem}"
+            ) from e

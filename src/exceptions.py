@@ -188,5 +188,28 @@ class IndexNotFoundError(RagError):
 
 
 class EvaluationError(RagError):
+    """The inputs of ``evaluate`` cannot be used to compute recall.
+
+    Attributes:
+        problem: The message without the ``Evaluation error:`` prefix, so
+            the command can wrap it with the path of the faulty file.
+    """
+
     def __init__(self, error: str) -> None:
+        """Store the problem and build the message.
+
+        Args:
+            error: What is wrong.
+        """
+        self.problem = error
         super().__init__(f"Evaluation error: {error}")
+
+
+class DatasetEvaluationError(EvaluationError):
+    """The ground-truth dataset cannot be used (no questions, or a
+    question without sources)."""
+
+
+class ResultsEvaluationError(EvaluationError):
+    """The search results are not valid (repeated question, too many
+    sources, impossible or too long range)."""
