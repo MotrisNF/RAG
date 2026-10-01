@@ -68,12 +68,21 @@ class FixedSizeChunker(BaseChunker):
 
     Attributes:
         SEPARATORS: Preferred cut points, best first.
+        CUT_BEFORE: Separators that START the next chunk instead of
+            ending the current one. None here: a blank line, a newline or
+            a space stays at the end of the chunk it closes.
     """
 
     SEPARATORS: tuple[str, ...] = ("\n\n", "\n", " ")
+    CUT_BEFORE: frozenset[str] = frozenset()
 
     def _find_cut(self, text: str, start: int, end: int, size: int) -> int:
         """Position where the chunk ``text[start:end]`` should end.
+
+        A separator of ``CUT_BEFORE`` (e.g. a Python definition in
+        ``PyChunker``) is cut right after its leading newline, so it
+        starts the next chunk instead of ending this one. Here
+        ``CUT_BEFORE`` is empty: every cut goes after the separator.
 
         Args:
             text: The whole document.
@@ -82,14 +91,19 @@ class FixedSizeChunker(BaseChunker):
             size: Maximum chunk size.
 
         Returns:
-            The position just after the best separator in the second
-            half of the chunk, or ``end`` if there is none.
+            For the best separator found in the second half of the chunk:
+            the position just before the definition (``CUT_BEFORE``) or
+            just after the separator (the others). ``end`` if there is
+            none.
         """
         for separator in self.SEPARATORS:
             position = text.rfind(separator, start, end)
 
             if position > start + size // 2:
-                return position + len(separator)
+                if separator not in self.CUT_BEFORE:
+                    return position + len(separator)
+                else:
+                    return position + 1
 
         return end
 
@@ -128,3 +142,42 @@ class FixedSizeChunker(BaseChunker):
             start = end
 
         return chunk_list
+
+
+class PyChunker(FixedSizeChunker):
+    """Cut Python code preferably right before a definition.
+
+    Chunks then hold whole classes, functions or methods when they fit,
+    instead of starting in the middle of one.
+
+    Attributes:
+        SEPARATORS: Preferred cut points, best first: top-level
+            definitions (decorators first, so they stay with what they
+            decorate), then methods (indented four spaces), then the
+            generic blank line, newline and space.
+        CUT_BEFORE: The definition separators. The cut goes right after
+            their leading newline, so ``@``, ``class`` or ``def`` begins
+            the next chunk.
+    """
+
+    SEPARATORS: tuple[str, ...] = (
+        "\n@",
+        "\nclass ",
+        "\ndef ",
+        "\nasync def ",
+        "\n    @",
+        "\n    def ",
+        "\n    async def ",
+        "\n\n",
+        "\n",
+        " ",
+    )
+    CUT_BEFORE: frozenset[str] = frozenset({
+        "\n@",
+        "\nclass ",
+        "\ndef ",
+        "\nasync def ",
+        "\n    @",
+        "\n    def ",
+        "\n    async def ",
+    })

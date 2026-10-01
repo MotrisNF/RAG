@@ -81,6 +81,14 @@ class BM25Index:
         progress = tqdm(chunks, desc="Tokenizing chunks", unit="chunk")
         for chunk_id, chunk in enumerate(progress):
             tokens = tokenizer.tokenize(chunk.text)
+            # EXPERIMENT: also index the file path, so every chunk of e.g.
+            # ".../models/keye.py" gets the term "keye" even when its text
+            # never says it. Only the indexed terms change: the chunk text
+            # and its offsets stay the same. Common parts of the path
+            # ("data", "raw", "vllm"...) appear in every chunk, so their IDF
+            # is ~0 and they barely count. Uncomment, rebuild the index
+            # (`index`) and compare with `evaluate`.
+            # tokens += tokenizer.tokenize(chunk.file_path)
             lengths.append(len(tokens))
             for term, count in Counter(tokens).items():
                 posting.setdefault(term, {})[chunk_id] = count

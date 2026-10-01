@@ -71,7 +71,8 @@ class TestTokenizer:
         ("How do I load a LoRA adapter?",
          ["how", "do", "i", "load", "a", "lora", "adapter"]),
         ("max_model_len", ["max", "model", "len"]),
-        ("vllm.entrypoints.openai", ["vllm", "entrypoints", "openai"]),
+        ("vllm.entrypoints.openai",
+         ["vllm", "entrypoints", "openai", "vllm.entrypoints.openai"]),
         ("--max-num-seqs=256", ["max", "num", "seqs", "256"]),
         ("fp8 and int4", ["fp8", "and", "int4"]),
         ("lora LoRA LORA", ["lora", "lora", "lora"]),
@@ -92,8 +93,86 @@ class TestTokenizer:
         assert Tokenizer().tokenize("café") == ["caf"]
 
     def test_pattern_compiled_once(self) -> None:
-        """The pattern is a shared, precompiled class attribute."""
+        """The patterns are shared, precompiled class attributes."""
         assert Tokenizer.PATTERN is Tokenizer().PATTERN
+        assert Tokenizer.COMPLEX_PATTERN is Tokenizer().COMPLEX_PATTERN
+
+
+class TestDottedTerms:
+    """Second pass: dotted names are also kept whole."""
+
+    @pytest.mark.parametrize("text, dotted", [
+        ("call llm.generate() now", ["llm.generate"]),
+        ("vllm.entrypoints.openai.api_server",
+         ["vllm.entrypoints.openai.api_server"]),
+        ("self.max_model_len = 4", ["self.max_model_len"]),
+        ("torch.float16 or torch.bfloat16",
+         ["torch.float16", "torch.bfloat16"]),
+        ("Use LLM.Generate here", ["llm.generate"]),
+        ("see lora.md and api_server.py", ["lora.md", "api_server.py"]),
+        ("version 0.10.1", ["0.10.1"]),
+        ("a.b.c.d", ["a.b.c.d"]),
+    ])
+    def test_extra_terms(self, text: str, dotted: list[str]) -> None:
+        """The dotted names, lowercase, in order, after the plain terms."""
+        tokens = Tokenizer().tokenize(text)
+        assert [t for t in tokens if "." in t] == dotted
+        assert tokens[len(tokens) - len(dotted):] == dotted
+
+    @pytest.mark.parametrize("text", [
+        "no dots here", "max_model_len", "end of sentence. Next one",
+        "trailing dot.", ".leading", "a .. b", "1. first item", "",
+    ])
+    def test_no_dotted_term(self, text: str) -> None:
+        """Without ``word.word`` nothing is added."""
+        assert all("." not in t for t in Tokenizer().tokenize(text))
+
+    def test_plain_terms_unchanged(self) -> None:
+        """The first pass gives the same terms as before."""
+        tokens = Tokenizer().tokenize("use llm.generate(prompt)")
+        assert tokens[:4] == ["use", "llm", "generate", "prompt"]
+
+    def test_parts_and_whole(self) -> None:
+        """Both the parts and the whole name are terms."""
+        tokens = Tokenizer().tokenize("vllm.entrypoints")
+        assert tokens == ["vllm", "entrypoints", "vllm.entrypoints"]
+
+    def test_repetitions_kept(self) -> None:
+        """A dotted name written twice counts twice (BM25 tf)."""
+        tokens = Tokenizer().tokenize("llm.generate then llm.generate")
+        assert tokens.count("llm.generate") == 2
+        assert tokens.count("llm") == 2
+
+    def test_never_duplicates_plain_terms(self) -> None:
+        """Second-pass terms always contain a dot, first-pass never."""
+        tokens = Tokenizer().tokenize("a.b c d.e f_g h.i_j")
+        plain = [t for t in tokens if "." not in t]
+        dotted = [t for t in tokens if "." in t]
+        assert not set(plain) & set(dotted)
+        assert dotted == ["a.b", "d.e", "h.i_j"]
+
+
+class TestDottedSearch:
+    """The dotted terms change the ranking as intended."""
+
+    def test_exact_name_ranks_first(self) -> None:
+        """A question quoting ``llm.generate`` prefers the chunk that
+        writes it, over chunks with ``llm`` and ``generate`` apart.
+        """
+        index = BM25Index.build(make_chunks(
+            "The llm can generate text and the llm is fast.",
+            "Call llm.generate with your prompts.",
+            "Generate a report about the llm."))
+        hits = index.search("What does llm.generate return?", 3)
+        assert hits[0].chunk.text == "Call llm.generate with your prompts."
+
+    def test_parts_still_match(self) -> None:
+        """A question without dots still finds the dotted chunk."""
+        index = BM25Index.build(make_chunks(
+            "Call llm.generate with your prompts.", "Unrelated text."))
+        hits = index.search("how to generate", 2)
+        assert [h.chunk.text for h in hits] == [
+            "Call llm.generate with your prompts."]
 
 
 class TestBuild:
