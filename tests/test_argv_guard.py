@@ -21,6 +21,8 @@ class Sample:
     def flags(self, verbose: bool = False, name: str = "") -> None:
         """A boolean flag next to a normal option."""
 
+    LIMIT: int = 3
+
     def _private(self) -> None:
         """Not a command."""
 
@@ -62,15 +64,38 @@ class TestAccepted:
 
     @pytest.mark.parametrize("argv", [
         [],
-        ["not_a_command", "--whatever"],
-        ["_private"],
         ["--help"],
+        ["-h"],
     ])
     def test_left_to_fire(self, guard: ArgvGuard, argv: list[str]) -> None:
-        """No command or an unknown command is Fire's business (it fails
-        before running anything).
-        """
+        """No command, or Fire's own flags: Fire shows the help."""
         assert guard.check(argv) == argv
+
+
+class TestUnknownCommand:
+    """Only public methods are commands. Fire would also run private
+    methods and print class attributes when named explicitly.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "not_a_command", "_private", "__init__", "__class__", "LIMIT",
+        "Search", "search_", "",
+    ])
+    def test_rejected(self, guard: ArgvGuard, name: str) -> None:
+        """``UsageError`` naming the word and the real commands."""
+        with pytest.raises(UsageError) as info:
+            guard.check([name, "x"])
+        assert f"Unknown command '{name}'" in str(info.value)
+        assert "flags, index, kinds, search" in str(info.value)
+
+    @pytest.mark.parametrize("name", [
+        "_search_question", "_open_file_save", "_print_ids", "SEPARATOR",
+        "MAX_IDS_SHOWN", "__dict__",
+    ])
+    def test_rag_cli_internals_rejected(self, name: str) -> None:
+        """Helpers and attributes of ``RagCLI`` are not reachable."""
+        with pytest.raises(UsageError, match="Unknown command"):
+            ArgvGuard(RagCLI).check([name])
 
 
 class TestHelp:
@@ -341,7 +366,7 @@ class TestPositionalParams:
         (["search", "hola", "--k", "5"], {"query"}),
         (["search", "--query", "hola", "5"], {"k"}),
         (["index", "--help"], set()),
-        (["not_a_command", "x"], set()),
+        (["-h"], set()),
     ])
     def test_after_check(self, guard: ArgvGuard, argv: list[str],
                          expected: set[str]) -> None:

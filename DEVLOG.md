@@ -234,7 +234,7 @@ A step-by-step record of what I did and **why**, so I can understand my own work
 
 ---
 
-## Step 13 — Load the index and `search` (2026-09-30) · not committed yet
+## Step 13 — Load the index and `search` (2026-09-30) · commit `cd46cff`
 
 **What**
 - `BM25Index.load(index_dir)` (classmethod): reads `index_dir / FILE_NAME`.
@@ -251,32 +251,71 @@ A step-by-step record of what I did and **why**, so I can understand my own work
 
 ---
 
-## 📍 WHERE I STOPPED (2026-09-30)
+## Step 14 — `search_dataset` and first moulinette run (2026-09-30 / 10-01) · commits `d938f2c`, `49010c9`, `ffa564a`
 
-Next: **`search_dataset`** in `src/commands.py`.
-1. Add `--index_dir` (default `data/processed`); load the index **once**, before the loop.
-2. Read the dataset: `RagDataset.model_validate_json(Path(dataset_path).read_text(encoding="utf-8"))`.
-   - `OSError` → `PathError`; `ValidationError` → `DatasetError`.
-   - `dataset.rag_questions` is already a list of `UnansweredQuestion` (or `AnsweredQuestion`, which inherits from it): no dicts to handle.
-3. For each question (with tqdm): `self._search_question(bm25, question, k)`. **Keep the dataset `question_id`** — the moulinette matches results by it.
-4. `StudentSearchResults(search_results=[...], k=k)` → write to `save_directory / <same file name as the dataset>` (create the folder; `OSError` → `PathError`). Print `Saved student_search_results to <path>`.
-5. Remove `search_dataset` from `TestPendingCommands` and add its tests.
-6. Run the moulinette and write the **baseline recall** here:
-   ```
-   uv run -m src index
-   uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --k 10 --save_directory data/output/search_results/UnansweredQuestions
-   ./moulinette evaluate_student_search_results data/output/search_results/UnansweredQuestions/dataset_docs_public.json data/datasets/AnsweredQuestions/dataset_docs_public.json --k 10
-   ```
-   Same for `dataset_code_public.json`.
+**What**
+- `search_dataset --dataset_path --k --save_directory --index_dir`: loads the index once, reads the dataset, searches every question (tqdm) with `_search_question` **keeping the dataset `question_id`**, writes a `StudentSearchResults` JSON to `save_directory/<same file name as the dataset>`.
+- `RagCLI._open_file_save(path, model) -> model`: generic reader for every JSON input (`TypeVar M bound=BaseModel`). Read error / not UTF-8 → `PathError`; invalid content → `DatasetError`.
+- `dataset_path` is **required** (no default dataset file).
+- `ArgvGuard` extended: a command name given as a value (`index -m 500 search`), text after `-` (chaining), unknown flags after `--`. `ArgError.describe` says when a value was taken as positional (`'patata' (positional, taken as --max_chunk_size)`).
+- `PathError` also accepts `UnicodeDecodeError`. Docstrings across `reader`, `chunker`, `tokenizer_bm`, `models`, `exceptions`. `IndexData` checks its own consistency (`model_validator`).
+- 704 tests passing at this point.
+
+**Baseline recall** (FixedSizeChunker 2000, BM25 own, `K1 = 1.5`, `B = 0.75`, tokenizer `[a-z0-9]+`):
+
+| Dataset | @1 | @3 | **@5** | @10 | Target @5 |
+|---|---|---|---|---|---|
+| docs | 61.0 % | 78.0 % | **85.0 %** | 88.0 % | ≥ 80 % ✅ |
+| code | 31.3 % | 53.5 % | **59.6 %** | 67.7 % | ≥ 50 % ✅ |
+
+- Timings: `index` 0.95 s (limit 5 min), `search_dataset` ~1.5 s per dataset (limit 90 s / 200 questions).
+- Edge cases checked: not UTF-8, broken JSON, empty dataset, folder instead of file, `save_directory` is a file, huge k, no index, AnsweredQuestions dataset as input (ids kept).
+
+**Learned**
+- `dataset.rag_questions` is already a list of `UnansweredQuestion` objects (no dicts); an `AnsweredQuestion` is one too (inheritance).
+- Creating `UnansweredQuestion(question=...)` generates a **new** id → the moulinette could not match anything (recall 0).
+- `return` inside a `try` works as usual; the `try` only catches what fails on that line.
+
+---
+
+## Step 15 — `evaluate`: own recall@k (2026-10-01) · commits `edc43e2`, `7556514`
+
+**What**
+- `src/evaluator.py`: `Evaluator` receives the **already loaded** models (no paths, no file reading).
+  - `_validate_dataset` → `dict[question_id, correct sources]`. Empty dataset, a question that is not an `AnsweredQuestion` or has no sources → `DatasetEvaluationError` (so recall never divides by 0).
+  - `_validate_results` → `dict[question_id, retrieved sources]`. Repeated id, more sources than `k`, impossible range, source longer than `MAX_CNTX_LEN` (2000, like the moulinette) → `ResultsEvaluationError`. Empty results are allowed.
+  - `_iou(a, b)`: intersection / union of two character ranges. `_is_found`: same `file_path` **and** IoU ≥ `MIN_IOU` (0.05). `_question_recall`: found / number of correct sources.
+  - `evaluate(results, dataset, k)`: `missing` (in the dataset, not in the results → recall 0) and `unknown` (in the results, not in the dataset → ignored); cutoffs `CUTOFFS = (1, 3, 5, 10)` that are ≤ `k` and ≤ `results.k`; recall@cutoff = sum / number of dataset questions. Returns `EvaluationInform`.
+- `DatasetEvaluationError` / `ResultsEvaluationError` (subclasses of `EvaluationError`, which keeps the bare message in `problem`): the `evaluate` command catches each one and re-raises it with **its** file path.
+- **Checked: identical numbers to the moulinette** on docs and code (table above).
+
+**Learned**
+- IoU: a 2000-char chunk containing a 40-char answer has IoU 0.02 → not found. Smaller chunks can score better.
+- A comprehension cannot `raise` → use a loop when building and validating at the same time; `isinstance` in the loop also narrows the type for mypy (`all(...)` + comprehension does not).
+- `isinstance(q, UnansweredQuestion)` is True for answered questions too (inheritance): check `not isinstance(q, AnsweredQuestion)`.
+- `or` short-circuits: `not isinstance(q, AnsweredQuestion) or not q.sources` never reads `sources` of an unanswered question.
+- A syntax error (empty method body) stops mypy entirely: read the last line of its output.
+- Imports inside the package need the dot (`from .models`): the program runs from the project root, not from `src/`.
+- Exceptions propagate on their own; catch in an intermediate function only to add information (here: the file path).
+
+---
+
+## 📍 WHERE I STOPPED (2026-10-01)
+
+`evaluate` computes everything but **does not print yet** (`evaluation` unused → flake8 F841). Pending:
+1. `EvaluationInform` → pydantic model with public fields (`recall`, `missing`, `unknown`), like `CorpusReadResult`.
+2. Print it in the `evaluate` command: one line per cutoff (`Recall@5: 0.850 (85.0%)`), plus how many questions were missing / unknown (and which, maybe only the first few).
+3. Fix flake8 `E122` in `evaluator.py` (the closing `)` of `return EvaluationInform(...)`).
+4. Tests: 3 tests still expect `evaluate` to be pending (`NotImplementedError`) → update them; add `tests/test_evaluator.py` (IoU cases, found/not found, missing/unknown, cutoffs, errors) and a regression test that reproduces the moulinette numbers (small JSON files in `tests/data/`).
 
 ---
 
 ## Next steps
 
 **Housekeeping**
-- [ ] Docstrings on every model in `models.py` (and the module), `reader.py`, `chunker.py`, `tokenizer_bm.py`, `exceptions.py` (`CorpusError`).
+- [x] Docstrings on `models.py`, `reader.py`, `chunker.py`, `tokenizer_bm.py`, `exceptions.py`.
+- [ ] Docstrings on `evaluator.py`.
 - [ ] Real `README.md` (English, subject sections). Current one is a personal reminder.
-- [ ] Commit Step 13.
 
 **Reader follow-ups**
 - [ ] Symlinked corpus: `resolve()` follows symlinks, so if `data/raw` is a symlink (e.g. to `goinfre` on campus) the resolved folder is outside `PROJECT_ROOT` and `read()` rejects it — stricter than the subject. Fix: normalise with `os.path.abspath` (removes `..`, does not follow symlinks) instead of `resolve()` for the corpus folder and the file paths. `../` must still be rejected. Add a test with a symlinked `data/raw`.
@@ -292,9 +331,9 @@ Next: **`search_dataset`** in `src/commands.py`.
 - [x] Own BM25 index + simple tokenizer + tests.
 - [x] `index` command: read → chunk → build → save (`--raw_dir`, `--index_dir`). ~0.7 s.
 - [x] `search` command (JSON output) + load.
-- [ ] `search_dataset` ← **next** (see "Where I stopped").
-- [ ] First run of the moulinette → write down the baseline recall here.
-- [ ] `evaluate` command; compare with the moulinette.
+- [x] `search_dataset` (Step 14).
+- [x] First run of the moulinette → baseline recall in Step 14.
+- [ ] `evaluate` command: computing done and matches the moulinette; **printing + tests pending** (see "Where I stopped").
 
 **Improve recall** (goal: docs ≥ 80 %, code ≥ 50 % recall@5)
 - [ ] `MarkdownChunker` (by headings) and `PythonChunker` (by functions/classes with `ast`; one vLLM file has a syntax error → fall back to `FixedSizeChunker`).

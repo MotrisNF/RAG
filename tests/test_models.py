@@ -151,6 +151,7 @@ class TestRealDatasets:
     def test_ids_match(self, name: str) -> None:
         """Unanswered and answered datasets list the same questions."""
         def ids(folder: str) -> list[str]:
+            """Question ids of the dataset in ``folder``."""
             path = DATASETS / folder / name
             data = RagDataset.model_validate_json(
                 path.read_text(encoding="utf-8"))

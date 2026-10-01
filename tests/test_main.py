@@ -62,6 +62,7 @@ class Runner:
     def run_raising(self, error: BaseException) -> tuple[int, str]:
         """Run ``main`` with Fire replaced by a function that raises."""
         def raiser(*args: object, **kwargs: object) -> None:
+            """Stand-in for Fire that raises the given error."""
             raise error
         self._monkeypatch.setattr(fire, "Fire", raiser)
         return self.run("search", "x")
@@ -184,6 +185,112 @@ class TestSearch:
                 "or blank") in err
 
 
+class TestEvaluate:
+    """The ``evaluate`` command: load both files, evaluate, report errors
+    with the path of the faulty file."""
+
+    DATASET = {"rag_questions": [{
+        "question_id": "q1", "question": "q", "answer": "a",
+        "sources": [{"file_path": "data/raw/a.md",
+                     "first_character_index": 0,
+                     "last_character_index": 10}]}]}
+
+    def write(self, path: Path, data: object) -> Path:
+        """Write ``data`` as JSON and return the path."""
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def results(self, start: int, end: int) -> dict[str, object]:
+        """Results with one source for ``q1``."""
+        return {"k": 10, "search_results": [{
+            "question_id": "q1", "question": "q",
+            "retrieved_sources": [{"file_path": "data/raw/a.md",
+                                   "first_character_index": start,
+                                   "last_character_index": end}]}]}
+
+    def test_valid_files(self, runner: Runner, tmp_path: Path) -> None:
+        """Valid inputs: exit 0, no error."""
+        code, err = runner.run(
+            "evaluate", "--student_search_results_path",
+            str(self.write(tmp_path / "r.json", self.results(0, 10))),
+            "--dataset_path", str(self.write(tmp_path / "d.json",
+                                             self.DATASET)))
+        assert code == 0
+        assert "Error" not in err and "Traceback" not in err
+
+    def test_summary_and_hint(self, runner: Runner, tmp_path: Path) -> None:
+        """Without the option: how many were found and a hint."""
+        code, out, _ = runner.run_full(
+            "evaluate", "--student_search_results_path",
+            str(self.write(tmp_path / "r.json", self.results(500, 600))),
+            "--dataset_path", str(self.write(tmp_path / "d.json",
+                                             self.DATASET)))
+        assert code == 0
+        assert "Found within k=10: 0/1 questions" in out
+        assert "Run with --show_failed" in out
+        assert "[FAILED]" not in out
+
+    def test_show_failed(self, runner: Runner, tmp_path: Path) -> None:
+        """``--show_failed`` (a flag, no value) lists them with the text."""
+        code, out, _ = runner.run_full(
+            "evaluate", "--student_search_results_path",
+            str(self.write(tmp_path / "r.json", self.results(500, 600))),
+            "--dataset_path", str(self.write(tmp_path / "d.json",
+                                             self.DATASET)),
+            "--show_failed")
+        assert code == 0
+        assert '[FAILED] q1  "q"' in out
+        assert "Run with --show_failed" not in out
+
+    def test_all_found_no_hint(self, runner: Runner, tmp_path: Path) -> None:
+        """Everything found: no hint and nothing listed."""
+        code, out, _ = runner.run_full(
+            "evaluate", "--student_search_results_path",
+            str(self.write(tmp_path / "r.json", self.results(0, 10))),
+            "--dataset_path", str(self.write(tmp_path / "d.json",
+                                             self.DATASET)),
+            "--show_failed")
+        assert code == 0
+        assert "Found within k=10: 1/1 questions" in out
+        assert "[FAILED]" not in out and "Run with" not in out
+
+    def test_dataset_without_answers(self, runner: Runner,
+                                     tmp_path: Path) -> None:
+        """An UnansweredQuestions dataset: message with the dataset path."""
+        unanswered = self.write(tmp_path / "u.json", {"rag_questions": [
+            {"question_id": "q1", "question": "q"}]})
+        code, err = runner.run(
+            "evaluate", "--student_search_results_path",
+            str(self.write(tmp_path / "r.json", self.results(0, 10))),
+            "--dataset_path", str(unanswered))
+        assert code == 1
+        assert f"dataset '{unanswered}'" in err
+        assert "question 'q1' has no sources" in err
+        assert err.count("Evaluation error:") == 1
+
+    def test_invalid_results(self, runner: Runner, tmp_path: Path) -> None:
+        """A source longer than 2000 chars: message with the results path."""
+        bad = self.write(tmp_path / "r.json", self.results(0, 3000))
+        code, err = runner.run(
+            "evaluate", "--student_search_results_path", str(bad),
+            "--dataset_path", str(self.write(tmp_path / "d.json",
+                                             self.DATASET)))
+        assert code == 1
+        assert f"results '{bad}'" in err
+        assert "has 3000 characters (max 2000)" in err
+
+    def test_results_file_is_a_dataset(self, runner: Runner,
+                                       tmp_path: Path) -> None:
+        """Files swapped: the results file does not match the model."""
+        dataset_file = self.write(tmp_path / "d.json", self.DATASET)
+        code, err = runner.run(
+            "evaluate", "--student_search_results_path", str(dataset_file),
+            "--dataset_path", str(dataset_file))
+        assert code == 1
+        assert f"Invalid file '{dataset_file}'" in err
+        assert "Traceback" not in err
+
+
 class TestPendingCommands:
     """Commands not written yet fail loudly and cleanly.
 
@@ -193,8 +300,6 @@ class TestPendingCommands:
     @pytest.mark.parametrize("args", [
         ("answer", "How to use LoRA?"),
         ("answer_dataset", "--student_search_results_path", DOCS_DATASET),
-        ("evaluate", "--student_search_results_path", DOCS_DATASET,
-         "--dataset_path", DOCS_DATASET),
     ])
     def test_not_implemented(self, runner: Runner,
                              args: tuple[str, ...]) -> None:
@@ -395,6 +500,21 @@ class TestUsageErrors:
         assert code == 2
 
 
+class TestUnknownCommand:
+    """Names that are not commands: usage error, nothing runs or prints."""
+
+    @pytest.mark.parametrize("name", ["SEPARATOR", "MAX_IDS_SHOWN",
+                                      "_print_ids", "_search_question",
+                                      "__class__", "nope"])
+    def test_exit_two(self, runner: Runner, name: str) -> None:
+        """Exit 2, the command list on stderr, nothing on stdout."""
+        code, out, err = runner.run_full(name, "x")
+        assert code == 2
+        assert out == ""
+        assert f"Unknown command '{name}'" in err
+        assert "evaluate, index, search, search_dataset" in err
+
+
 class TestCommandNeverRuns:
     """Malformed command lines stop BEFORE the command runs.
 
@@ -408,6 +528,7 @@ class TestCommandNeverRuns:
         calls: list[str] = []
 
         def spy(self: CorpusReader) -> None:
+            """Record the call and fail if the corpus is read."""
             calls.append("read")
             raise AssertionError("the corpus was read")
 

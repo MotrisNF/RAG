@@ -240,6 +240,7 @@ class TestSkippedFiles:
 
         def fake_read_text(self: Path, *args: object,
                            **kwargs: object) -> str:
+            """Fail with PermissionError for the locked file only."""
             if self == bad:
                 raise PermissionError("denied")
             return original(self, *args, **kwargs)  # type: ignore[arg-type]
@@ -341,6 +342,7 @@ class TestProjectBoundary:
             self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """No file is listed or read when the folder is outside."""
         def must_not_run(self: CorpusReader) -> list[Path]:
+            """Fail the test if files are listed."""
             raise AssertionError("files were listed")
         monkeypatch.setattr(CorpusReader, "_list_files", must_not_run)
         with pytest.raises(CorpusError, match="outside the project root"):

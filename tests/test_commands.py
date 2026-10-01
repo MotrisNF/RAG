@@ -127,8 +127,11 @@ class TestErrors:
         argument error: it goes through unchanged.
         """
         class Broken:
+            """A command whose body raises a ValidationError of its own."""
+
             @CliCommand.validated
             def run(self, k: int = 1) -> None:
+                """Validate the dataset inside the body (always fails)."""
                 RagDataset.model_validate({})
 
         with pytest.raises(ValidationError) as info:

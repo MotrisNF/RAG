@@ -64,6 +64,7 @@ class CliCommand:
 
         @functools.wraps(func)
         def command(*args: Any, **kwargs: Any) -> Any:
+            """Run ``func`` after validating its arguments."""
             try:
                 return validator(*args, **kwargs)
             except ValidationError as e:
@@ -86,7 +87,15 @@ class RagCLI:
 
     Arguments are validated by pydantic (``CliCommand.validated``) before
     each command runs, so invalid values raise ``ValidationError``.
+
+    Attributes:
+        MAX_IDS_SHOWN: How many question ids ``evaluate`` lists before
+            summarising the rest.
+        SEPARATOR: Line between the sections of the ``evaluate`` report.
     """
+
+    MAX_IDS_SHOWN: int = 5
+    SEPARATOR: str = "=" * 35
 
     @CliCommand.validated
     def index(
@@ -293,15 +302,22 @@ class RagCLI:
             self,
             student_search_results_path: FilePath,
             dataset_path: FilePath,
-            k: Annotated[int, Field(gt=0)] = 10
+            k: Annotated[int, Field(gt=0)] = 10,
+            show_failed: bool = False
             ) -> None:
         """Print recall@k of search results against a ground-truth dataset.
+
+        Same metric as the moulinette's evaluate_student_search_results;
+        with show_failed it also lists, like its list_valid_questions, the
+        questions whose sources were not found.
 
         Args:
             student_search_results_path: JSON file written by search_dataset.
             dataset_path: JSON file with the correct sources
                 (AnsweredQuestions).
             k: Largest k for which recall is reported.
+            show_failed: List every question not found within the first k
+                results, with its text.
         """
 
         dataset = self._open_file_save(
@@ -322,3 +338,64 @@ class RagCLI:
             raise ResultsEvaluationError(
                 f"results '{student_search_results_path}': {e.problem}"
             ) from e
+        print("Student data is valid: True")
+        print("Evaluation Results")
+        print(self.SEPARATOR)
+        for cutoff, value in evaluation.recall.items():
+            print(f"Recall@{cutoff}: {value:.3f} ", end="")
+        print()
+        self._print_ids(
+            f"Your results contain {len(evaluation.unknown)} questions "
+            "that are not in the dataset (ignored):",
+            evaluation.unknown,
+        )
+        self._print_ids(
+            f"Your results are missing {len(evaluation.missing)} "
+            "questions (counted as 0):",
+            evaluation.missing,
+        )
+        total = len(dataset.rag_questions)
+        print(self.SEPARATOR)
+        print(f"Found within k={min(k, retrived.k)}: "
+              f"{total - len(evaluation.failed)}/{total} questions")
+        if show_failed:
+            self._print_failed(evaluation.failed, dataset)
+        elif evaluation.failed:
+            print("Run with --show_failed to list the questions not found.")
+        print(self.SEPARATOR)
+
+    @classmethod
+    def _print_failed(cls, failed: list[str], dataset: RagDataset) -> None:
+        """Print every question that was not found, with its text.
+
+        Args:
+            failed: Ids of the questions not found, in dataset order.
+            dataset: The dataset, to look up the text of each question.
+        """
+        if not failed:
+            return
+        texts = {q.question_id: q.question for q in dataset.rag_questions}
+        print(cls.SEPARATOR)
+        print(f"Questions not found ({len(failed)}):")
+        for question_id in failed:
+            print(f"  [FAILED] {question_id}  \"{texts[question_id]}\"")
+
+    @classmethod
+    def _print_ids(cls, title: str, ids: list[str]) -> None:
+        """Print a section with some question ids, if there are any.
+
+        At most ``MAX_IDS_SHOWN`` ids are listed; the rest are counted.
+
+        Args:
+            title: First line of the section.
+            ids: Question ids to show; nothing is printed when empty.
+        """
+        if not ids:
+            return
+        print(cls.SEPARATOR)
+        print(title)
+        for question_id in ids[:cls.MAX_IDS_SHOWN]:
+            print(f"  {question_id}")
+        hidden = len(ids) - cls.MAX_IDS_SHOWN
+        if hidden > 0:
+            print(f"  ... and {hidden} more")

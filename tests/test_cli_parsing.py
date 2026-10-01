@@ -37,9 +37,9 @@ class TestValidArguments:
         ["answer_dataset", "--student_search_results_path", DOCS_DATASET],
         ["answer_dataset", "--student_search_results_path", DOCS_DATASET,
          "--save_directory", "folder/that/does/not/exist/yet"],
-        ["evaluate", "--student_search_results_path", DOCS_DATASET,
+        ["evaluate", "--student_search_results_path", "folder/results.json",
          "--dataset_path", DOCS_ANSWERED],
-        ["evaluate", "--student_search_results_path", DOCS_DATASET,
+        ["evaluate", "--student_search_results_path", "folder/results.json",
          "--dataset_path", DOCS_ANSWERED, "--k", "5"],
     ])
     def test_accepted(self, command: list[str], tmp_path: Path) -> None:
@@ -49,7 +49,12 @@ class TestValidArguments:
         body: reaching the body means validation already passed. ``index``
         saves into a temporary folder, never into ``data/processed``, and
         ``search_dataset`` writes its results into a temporary folder too.
+        ``evaluate`` gets a small valid results file.
         """
+        if command[0] == "evaluate":
+            (tmp_path / "folder").mkdir()
+            (tmp_path / "folder" / "results.json").write_text(
+                '{"search_results": [], "k": 10}', encoding="utf-8")
         command = [str(tmp_path / arg) if arg.startswith("folder/") else arg
                    for arg in command]
         if command[0] == "index":
@@ -145,6 +150,7 @@ class TestUnknownFlag:
         calls: list[tuple[str, int]] = []
 
         def spy(self: RagCLI, query: str, k: int = 10) -> None:
+            """Record the call instead of searching."""
             calls.append((query, k))
 
         monkeypatch.setattr(RagCLI, "search", spy)

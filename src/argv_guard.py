@@ -59,12 +59,22 @@ class ArgvGuard:
             was asked for, so the command is never run.
 
         Raises:
-            UsageError: Unknown option, too many arguments, a command
-                name given as a value, or text after a separator that
-                Fire would only reject after running the command.
+            UsageError: Unknown command (Fire would also run private
+                methods and show class attributes), unknown option, too
+                many arguments, a command name given as a value, or text
+                after a separator that Fire would only reject after
+                running the command.
         """
         self.positional = set()
-        if not argv or argv[0] not in self._commands():
+        if not argv:
+            return argv
+        commands = self._commands()
+        if not argv[0].startswith("-") and argv[0] not in commands:
+            raise UsageError(
+                f"Unknown command '{argv[0]}'. Available commands: "
+                f"{', '.join(sorted(commands))}"
+            )
+        if argv[0] not in commands:
             return argv
         command, args = argv[0], self._before_separator(argv[1:])
         if any(arg in self.HELP_FLAGS for arg in args):

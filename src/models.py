@@ -193,22 +193,51 @@ class IndexData(BaseModel):
 
 
 class EvaluationInform:
+    """Result of an evaluation (read-only).
+
+    Attributes:
+        recall: ``cutoff → recall``, e.g. ``{1: 0.61, 5: 0.85}``.
+        missing: Dataset questions absent from the results (count as 0).
+        unknown: Result questions absent from the dataset (ignored).
+        failed: Dataset questions whose correct sources were not all found
+            within the first k results (missing ones included), in dataset
+            order.
+    """
+
     def __init__(self,
                  recall: dict[int, float],
                  missing: list[str],
-                 unknown: list[str]) -> None:
+                 unknown: list[str],
+                 failed: list[str]) -> None:
+        """Store the results of ``Evaluator.evaluate``.
+
+        Args:
+            recall: Recall per cutoff.
+            missing: Ids of the questions without results.
+            unknown: Ids of the results that are not in the dataset.
+            failed: Ids of the questions not fully found.
+        """
         self._recall = recall
         self._missing = missing
         self._unknown = unknown
+        self._failed = failed
 
     @property
     def recall(self) -> dict[int, float]:
+        """Recall per cutoff."""
         return self._recall
 
     @property
     def missing(self) -> list[str]:
+        """Ids of the dataset questions absent from the results."""
         return self._missing
 
     @property
     def unknown(self) -> list[str]:
+        """Ids of the results that are not in the dataset."""
         return self._unknown
+
+    @property
+    def failed(self) -> list[str]:
+        """Ids of the questions not fully found within k results."""
+        return self._failed

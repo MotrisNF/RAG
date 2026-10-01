@@ -32,8 +32,9 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 check_untyped_defs = true
 ignore_missing_imports = true
-# `mypy .` must only check our code, not the vLLM corpus under data/.
-exclude = ['^\.venv/', '^data/', '^build/', '^dist/']
+# `mypy .` must only check our code, not the corpora under data/ and
+# tests/data/.
+exclude = ['^\.venv/', '^data/', '^tests/data/', '^build/', '^dist/']
 
 [tool.pytest.ini_options]
 # Only our tests (data/raw/vllm-0.10.1 ships its own test suite).
