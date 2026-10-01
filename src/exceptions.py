@@ -1,4 +1,5 @@
 """Exception hierarchy for the RAG project."""
+from collections.abc import Collection
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -40,7 +41,12 @@ class DatasetError(RagError):
 class ArgError(RagError):
     """A command-line argument was rejected by validation.
 
-    One line per invalid argument: ``--option 'value': reason``.
+    One line per invalid argument: ``--option 'value': reason``, or
+    ``'value' (positional, taken as --option): reason`` when the value
+    was written without its option (see ``describe``).
+
+    Attributes:
+        problems: ``(option, value, reason)`` of each invalid argument.
     """
 
     def __init__(self, error: ValidationError, names: list[str]) -> None:
@@ -53,11 +59,37 @@ class ArgError(RagError):
                 (``loc``), and Fire always passes them by position, so the
                 position is turned back into the option name here.
         """
+        self.problems: list[tuple[str, object, str]] = [
+            (self._option(err["loc"], names), err["input"],
+             self._reason(err))
+            for err in error.errors()
+        ]
+        super().__init__(self.describe())
+
+    def describe(self, positional: Collection[str] = ()) -> str:
+        """The message, telling apart the values written without option.
+
+        Fire passes every argument by position, so only the command line
+        (``ArgvGuard``) knows which values had no option. Saying
+        ``--max_chunk_size 'patata'`` for ``index patata`` would claim the
+        user wrote an option they did not.
+
+        Args:
+            positional: Parameter names that received a value without
+                its option.
+
+        Returns:
+            ``Invalid arguments:`` and one line per invalid argument.
+        """
         lines = ["Invalid arguments:"]
-        for err in error.errors():
-            option = self._option(err["loc"], names)
-            lines.append(f"  {option} '{err['input']}': {self._reason(err)}")
-        super().__init__("\n".join(lines))
+        for option, value, reason in self.problems:
+            if option.removeprefix("--") in positional:
+                lines.append(
+                    f"  '{value}' (positional, taken as {option}): {reason}"
+                )
+            else:
+                lines.append(f"  {option} '{value}': {reason}")
+        return "\n".join(lines)
 
     @staticmethod
     def _option(loc: tuple[int | str, ...], names: list[str]) -> str:
@@ -85,7 +117,16 @@ class ArgError(RagError):
 
 
 class CorpusError(RagError):
-    def __init__(self, msg: str = "Something failed reading the corpus."):
+    """The corpus folder is missing, outside the project or unreadable."""
+
+    def __init__(
+            self, msg: str = "Something failed reading the corpus."
+            ) -> None:
+        """Store the message.
+
+        Args:
+            msg: Message shown to the user.
+        """
         super().__init__(msg)
 
 
@@ -110,17 +151,22 @@ class PathError(RagError):
 
     Wraps the ``OSError`` raised by the operating system (missing
     permissions, a file where a folder was expected, disk full...) into
-    a short message for the user.
+    a short message for the user. A ``UnicodeDecodeError`` (a file that
+    is not UTF-8 text) is accepted too.
     """
 
-    def __init__(self, path: str | Path, error: OSError) -> None:
+    def __init__(self, path: str | Path,
+                 error: OSError | UnicodeDecodeError) -> None:
         """Build the message from the path and the system error.
 
         Args:
             path: The file or folder that failed.
-            error: The original ``OSError``.
+            error: The original ``OSError`` or ``UnicodeDecodeError``.
         """
-        reason = error.strerror or type(error).__name__
+        if isinstance(error, UnicodeDecodeError):
+            reason = "not valid UTF-8 text"
+        else:
+            reason = error.strerror or type(error).__name__
         super().__init__(f"Cannot use '{path}': {reason}")
 
 

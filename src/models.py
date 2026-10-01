@@ -1,72 +1,192 @@
+"""Pydantic models exchanged between the stages of the RAG pipeline.
+
+The first group follows the subject's Data Models section; the rest are
+internal to the project (documents, chunks, hits and the saved index).
+"""
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MinimalSource(BaseModel):
+    """A character range of a corpus file.
+
+    Attributes:
+        file_path: Path relative to the project root, as in the corpus
+            (``data/raw/vllm-0.10.1/...``).
+        first_character_index: Start of the range (included).
+        last_character_index: End of the range (excluded).
+    """
+
     file_path: str
     first_character_index: int
     last_character_index: int
 
 
 class Chunk(MinimalSource):
+    """A piece of a corpus file, with its text.
+
+    Attributes:
+        text: The characters of the file inside the range.
+    """
+
     text: str
 
 
 class UnansweredQuestion(BaseModel):
+    """A question without its reference answer.
+
+    Attributes:
+        question_id: Unique id; a new UUID when not given.
+        question: The question text.
+    """
+
     question_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     question: str
 
 
 class AnsweredQuestion(UnansweredQuestion):
+    """A question with its reference sources and answer.
+
+    Attributes:
+        sources: Locations of the corpus that answer the question.
+        answer: The reference answer.
+    """
+
     sources: list[MinimalSource]
     answer: str
 
 
 class RagDataset(BaseModel):
+    """A dataset of questions, answered or not.
+
+    Attributes:
+        rag_questions: The questions of the dataset.
+    """
+
     rag_questions: list[AnsweredQuestion | UnansweredQuestion]
 
 
 class MinimalSearchResults(BaseModel):
+    """The sources retrieved for one question.
+
+    Attributes:
+        question_id: Id of the question.
+        question: The question text.
+        retrieved_sources: The sources found, best first.
+    """
+
     question_id: str
     question: str
     retrieved_sources: list[MinimalSource]
 
 
 class MinimalAnswer(MinimalSearchResults):
+    """The sources retrieved for one question and the generated answer.
+
+    Attributes:
+        answer: The answer generated from the retrieved sources.
+    """
+
     answer: str
 
 
 class StudentSearchResults(BaseModel):
+    """Output of ``search_dataset``: the results of every question.
+
+    Attributes:
+        search_results: One entry per question.
+        k: Number of sources requested per question.
+    """
+
     search_results: list[MinimalSearchResults]
     k: int
 
 
 class StudentSearchResultsAndAnswer(BaseModel):
+    """Output of ``answer_dataset``: results and answers of every question.
+
+    Attributes:
+        search_results: One entry per question, with its answer.
+        k: Number of sources requested per question.
+    """
+
     search_results: list[MinimalAnswer]
     k: int
 
 
 class Document(BaseModel):
+    """A whole corpus file read into memory.
+
+    Attributes:
+        file_path: Path relative to the project root.
+        text: Full content of the file.
+    """
+
     file_path: str
     text: str
 
 
 class CorpusReadResult(BaseModel):
+    """What ``CorpusReader.read`` found in the corpus folder.
+
+    Attributes:
+        documents: The files read successfully.
+        skipped: Paths of the files that could not be read.
+    """
+
     documents: list[Document]
     skipped: list[str]
 
     @property
     def found(self) -> int:
+        """Number of candidate files, read or skipped."""
         return len(self.documents) + len(self.skipped)
 
 
 class SearchHit(BaseModel):
+    """A chunk returned by a search, with its score.
+
+    Attributes:
+        chunk: The matching chunk.
+        score: BM25 score; higher is better.
+    """
+
     chunk: Chunk
     score: float
 
 
 class IndexData(BaseModel):
+    """The BM25 index as saved on disk.
+
+    Attributes:
+        chunks: The indexed chunks; a chunk id is its position here.
+        postings: Inverted index, ``term → {chunk id: occurrences}``.
+        lengths: Number of tokens of each chunk, by chunk id.
+    """
+
     chunks: list[Chunk]
     postings: dict[str, dict[int, int]]
     lengths: list[int]
+
+    @model_validator(mode="after")
+    def _check_consistent(self) -> "IndexData":
+        """Reject an index BM25 cannot search.
+
+        One length per chunk and at least one token in total: otherwise
+        the average chunk length would be 0 (division by zero).
+
+        Returns:
+            The validated index.
+
+        Raises:
+            ValueError: The lengths do not match the chunks, or there
+                are no tokens.
+        """
+        if len(self.lengths) != len(self.chunks):
+            raise ValueError(
+                f"{len(self.lengths)} lengths for {len(self.chunks)} chunks"
+            )
+        if sum(self.lengths) <= 0:
+            raise ValueError("the index has no tokens")
+        return self

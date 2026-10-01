@@ -47,11 +47,17 @@ class TestValidArguments:
 
         Commands not written yet raise ``NotImplementedError`` from their
         body: reaching the body means validation already passed. ``index``
-        saves into a temporary folder, never into ``data/processed``.
+        saves into a temporary folder, never into ``data/processed``, and
+        ``search_dataset`` writes its results into a temporary folder too.
         """
+        command = [str(tmp_path / arg) if arg.startswith("folder/") else arg
+                   for arg in command]
         if command[0] == "index":
             command = [*command, "--index_dir", str(tmp_path)]
-        if command[0] == "search":
+        if command[0] == "search_dataset":
+            if "--save_directory" not in command:
+                command = [*command, "--save_directory", str(tmp_path)]
+        if command[0] in ("search", "search_dataset"):
             chunk = Chunk(file_path="data/raw/a.md", first_character_index=0,
                           last_character_index=15, text="How to use LoRA")
             BM25Index.build([chunk]).save(tmp_path)
@@ -117,7 +123,6 @@ class TestWrongUsage:
     @pytest.mark.parametrize("command", [
         ["search"],
         ["answer"],
-        ["search_dataset"],
         ["answer_dataset"],
         ["evaluate", "--dataset_path", DOCS_ANSWERED],
         ["not_a_command"],

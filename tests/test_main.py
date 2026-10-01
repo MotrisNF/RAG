@@ -180,7 +180,8 @@ class TestSearch:
         """Validation still runs before loading anything."""
         code, err = runner.run("search", "  ", "--index_dir", str(index_dir))
         assert code == 1
-        assert "--query '  ': must not be empty or blank" in err
+        assert ("'  ' (positional, taken as --query): must not be empty "
+                "or blank") in err
 
 
 class TestPendingCommands:
@@ -190,7 +191,6 @@ class TestPendingCommands:
     """
 
     @pytest.mark.parametrize("args", [
-        ("search_dataset", "--dataset_path", DOCS_DATASET),
         ("answer", "How to use LoRA?"),
         ("answer_dataset", "--student_search_results_path", DOCS_DATASET),
         ("evaluate", "--student_search_results_path", DOCS_DATASET,
@@ -318,7 +318,57 @@ class TestArgumentErrors:
         """An empty query is rejected."""
         code, err = runner.run("search", "")
         assert code == 1
-        assert "--query '': must not be empty or blank" in err
+        assert ("'' (positional, taken as --query): must not be empty or "
+                "blank") in err
+
+    def test_empty_query_as_option(self, runner: Runner) -> None:
+        """Written with its option, the message shows the option."""
+        code, err = runner.run("search", "--query", "")
+        assert code == 1
+        assert "  --query '': must not be empty or blank" in err
+
+    @pytest.mark.parametrize("args, line", [
+        (("index", "patata"),
+         "  'patata' (positional, taken as --max_chunk_size): Input should "
+         "be a valid integer"),
+        (("index", "--max_chunk_size", "patata"),
+         "  --max_chunk_size 'patata': Input should be a valid integer"),
+        (("index", "-m", "patata"),
+         "  --max_chunk_size 'patata': Input should be a valid integer"),
+        (("index", "--max_chunk_size=patata"),
+         "  --max_chunk_size 'patata': Input should be a valid integer"),
+        (("index", "--raw_dir", "x", "patata"),
+         "  'patata' (positional, taken as --max_chunk_size): Input should "
+         "be a valid integer"),
+        (("search", "hola", "abc"),
+         "  'abc' (positional, taken as --k): Input should be a valid "
+         "integer"),
+        (("search", "abc", "--query", "hola"),
+         "  'abc' (positional, taken as --k): Input should be a valid "
+         "integer"),
+        (("search_dataset", "no.json"),
+         "  'no.json' (positional, taken as --dataset_path): Path does not "
+         "point to a file"),
+    ])
+    def test_positional_or_option(self, runner: Runner,
+                                  args: tuple[str, ...], line: str) -> None:
+        """The message says whether the value was written without its
+        option, so it never shows an option the user did not write.
+        """
+        code, err = runner.run(*args)
+        assert code == 1
+        assert line in err
+
+    def test_mixed_positional_and_option(self, runner: Runner) -> None:
+        """Each line is worded on its own."""
+        code, err = runner.run("search", "hola", "0", "--index_dir", "")
+        assert code == 1
+        assert err == (
+            "Invalid arguments:\n"
+            "  '0' (positional, taken as --k): Input should be greater "
+            "than 0\n"
+            "  --index_dir '': must not be empty or blank\n"
+        )
 
     def test_missing_file(self, runner: Runner) -> None:
         """A dataset that does not exist is rejected."""

@@ -123,6 +123,27 @@ class TestArgError:
         error = ErrorFactory.from_cli(["search", value])
         assert f"--query '{value}': must not be empty or blank" in str(error)
 
+    def test_describe_positional(self) -> None:
+        """A value written without its option says so."""
+        error = ErrorFactory.from_cli(["index", "patata"])
+        assert error.describe({"max_chunk_size"}) == (
+            "Invalid arguments:\n"
+            "  'patata' (positional, taken as --max_chunk_size): Input "
+            "should be a valid integer, unable to parse string as an integer"
+        )
+
+    def test_describe_without_positional_is_str(self) -> None:
+        """With no positional information it is the default message."""
+        error = ErrorFactory.from_cli(["search", "", "--k", "abc"])
+        assert error.describe() == str(error)
+
+    def test_describe_only_marks_given_params(self) -> None:
+        """Each line is worded on its own."""
+        error = ErrorFactory.from_cli(["search", "", "--k", "abc"])
+        lines = error.describe({"query"}).splitlines()
+        assert lines[1].startswith("  '' (positional, taken as --query):")
+        assert lines[2].startswith("  --k 'abc':")
+
     def test_option_by_position(self) -> None:
         """A numeric ``loc`` is turned into the parameter name."""
         assert ArgError._option((2,), self.NAMES) == "--k"

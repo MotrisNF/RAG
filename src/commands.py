@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from .bm25_index import BM25Index
 from .chunker import FixedSizeChunker
-from .exceptions import ArgError
+from .exceptions import ArgError, DatasetError, PathError
 from .models import (MinimalSearchResults, MinimalSource, StudentSearchResults,
                      RagDataset, UnansweredQuestion)
 from .reader import CorpusReader
@@ -187,12 +187,14 @@ class RagCLI:
     @CliCommand.validated
     def search_dataset(
             self,
-            dataset_path: FilePath,
+            dataset_path: FilePath = Path(
+                "data/datasets/UnansweredQuestions/dataset_code_public.json"
+                ),
             k: Annotated[int, Field(gt=0)] = 10,
             save_directory: Annotated[
                 str,
                 Field(min_length=1)
-                ] = "data/output/search_results",
+                ] = "data/output/search_results/UnansweredQuestions",
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
         """Search every question of a dataset and save the results as JSON.
@@ -205,13 +207,31 @@ class RagCLI:
             index_dir: Folder where the index command saved the index.
         """
         bm25 = BM25Index.load(Path(index_dir))
-        text = Path(dataset_path).read_text(encoding="utf-8")
-        dataset = RagDataset.model_validate_json(text)
+        try:
+            text = dataset_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise PathError(dataset_path, e) from e
+        try:
+            dataset = RagDataset.model_validate_json(text)
+        except ValidationError as e:
+            raise DatasetError(str(dataset_path), e) from e
 
         results_list: list[MinimalSearchResults] = []
-        for question in tqdm(dataset.rag_questions):
+        for question in tqdm(
+                        dataset.rag_questions,
+                        desc="Searching in the index",
+                        unit="question"
+                        ):
             results_list.append(self._search_question(bm25, question, k))
         output = StudentSearchResults(search_results=results_list, k=k)
+        try:
+            Path(save_directory).mkdir(parents=True, exist_ok=True)
+            path = Path(save_directory) / dataset_path.name
+            path.write_text(output.model_dump_json(indent=2),
+                            encoding="utf-8")
+        except OSError as e:
+            raise PathError(save_directory, e) from e
+        print(f"File saved in '{path}'")
 
     @CliCommand.validated
     def answer(
@@ -234,7 +254,8 @@ class RagCLI:
             save_directory: Annotated[
                 str,
                 Field(min_length=1)
-                ] = "data/output/search_results_and_answer"
+                ] = ("data/output/search_results_and_answer/"
+                     "UnansweredQuestions")
             ) -> None:
         """Generate answers for the output of search_dataset.
 

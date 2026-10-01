@@ -21,6 +21,11 @@ wheels/
 #!data/**/.gitkeep
 data/raw/*
 !data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/output/**/*
+!data/output/**/
+!data/output/**/.gitkeep
 
 # Local material, not part of the submission
 #en.subject.pdf

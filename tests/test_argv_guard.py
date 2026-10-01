@@ -65,12 +65,10 @@ class TestAccepted:
         ["not_a_command", "--whatever"],
         ["_private"],
         ["--help"],
-        ["search", "--", "--trace"],
-        ["search", "hola", "-", "upper"],
     ])
     def test_left_to_fire(self, guard: ArgvGuard, argv: list[str]) -> None:
-        """No command, unknown commands and text after a separator are
-        Fire's business (it fails before running anything).
+        """No command or an unknown command is Fire's business (it fails
+        before running anything).
         """
         assert guard.check(argv) == argv
 
@@ -205,6 +203,166 @@ class TestMissingValue:
         assert guard.check(argv) == ["index", "--", "--help"]
 
 
+class TestCommandAsValue:
+    """A command name that Fire would take as a positional value.
+
+    Fire gives positional arguments, in order, to the parameters not given
+    as options, so ``index 500 search`` would run ``index`` with
+    ``raw_dir='search'``.
+    """
+
+    @pytest.mark.parametrize("argv, param", [
+        (["index", "search"], "max_chunk_size"),
+        (["index", "500", "search"], "raw_dir"),
+        (["index", "--max_chunk_size", "500", "search"], "raw_dir"),
+        (["index", "-m", "500", "search"], "raw_dir"),
+        (["index", "--raw_dir", "x", "index"], "max_chunk_size"),
+        (["search", "hola", "index"], "k"),
+        (["search", "--query", "hola", "index"], "k"),
+        (["kinds", "--kind", "b", "flags"], "key"),
+    ])
+    def test_rejected(self, guard: ArgvGuard, argv: list[str],
+                      param: str) -> None:
+        """``UsageError`` naming the command and the parameter it hit."""
+        value = argv[-1]
+        with pytest.raises(UsageError) as info:
+            guard.check(argv)
+        assert str(info.value) == (
+            f"'{value}' is a command, not a value for --{param} of "
+            f"'{argv[0]}'. Run one command at a time"
+        )
+
+    @pytest.mark.parametrize("argv", [
+        ["search", "index"],
+        ["search", "search"],
+        ["search", "--k", "5", "index"],
+        ["search", "index", "5"],
+        ["search", "--query", "index"],
+        ["index", "--raw_dir", "search"],
+        ["index", "-r", "search"],
+        ["index", "--raw_dir=search"],
+        ["kinds", "--key", "index"],
+    ])
+    def test_accepted(self, guard: ArgvGuard, argv: list[str]) -> None:
+        """A command name as free text (``query``) or as the explicit
+        value of an option is what the user asked for.
+        """
+        assert guard.check(argv) == argv
+
+    def test_unknown_option_reported_first(self, guard: ArgvGuard) -> None:
+        """A typo in an option is the first thing to fix."""
+        with pytest.raises(UsageError, match="Unknown option '--nope'"):
+            guard.check(["index", "--nope", "1", "search"])
+
+    def test_too_many_reported_first(self, guard: ArgvGuard) -> None:
+        """Too many arguments wins over the command-name check."""
+        with pytest.raises(UsageError, match="Too many arguments"):
+            guard.check(["search", "hola", "5", "index"])
+
+
+class TestSeparators:
+    """Text after ``-`` or ``--``, which Fire handles after running."""
+
+    @pytest.mark.parametrize("argv", [
+        ["search", "hola", "-"],
+        ["search", "hola", "--"],
+        ["search", "--", "--trace"],
+        ["search", "hola", "--", "--trace", "--verbose"],
+        ["search", "hola", "--", "-t", "-v"],
+        ["search", "hola", "--", "--interactive"],
+        ["search", "hola", "--", "--separator", "+"],
+        ["search", "hola", "--", "--separator=+"],
+        ["search", "hola", "--", "--completion"],
+        ["search", "hola", "--", "--completion", "fish"],
+        ["search", "hola", "--", "--completion", "--trace"],
+    ])
+    def test_accepted(self, guard: ArgvGuard, argv: list[str]) -> None:
+        """A lone separator or Fire's own flags after ``--``."""
+        assert guard.check(argv) == argv
+
+    @pytest.mark.parametrize("argv, extra", [
+        (["search", "hola", "-", "upper"], "upper"),
+        (["index", "-", "search"], "search"),
+        (["index", "-m", "500", "-", "search", "hola"], "search hola"),
+        (["index", "-", "--help"], "--help"),
+    ])
+    def test_chain_rejected(self, guard: ArgvGuard, argv: list[str],
+                            extra: str) -> None:
+        """Nothing can follow ``-``: the commands return nothing."""
+        with pytest.raises(UsageError) as info:
+            guard.check(argv)
+        assert str(info.value) == (
+            f"Unexpected arguments after '-' for '{argv[0]}': {extra}. "
+            "Commands cannot be chained"
+        )
+
+    @pytest.mark.parametrize("argv, unknown", [
+        (["index", "--", "--una_flag", "search"], "--una_flag"),
+        (["index", "--", "search"], "search"),
+        (["search", "hola", "--", "--trace", "extra"], "extra"),
+        (["search", "hola", "--", "--trace", "-", "x"], "-"),
+        (["search", "hola", "--", "--k", "5"], "--k"),
+    ])
+    def test_unknown_fire_flag_rejected(self, guard: ArgvGuard,
+                                        argv: list[str],
+                                        unknown: str) -> None:
+        """Fire would silently ignore it, so it is an error here."""
+        with pytest.raises(UsageError) as info:
+            guard.check(argv)
+        message = str(info.value)
+        assert message.startswith(
+            f"Unknown Fire flag '{unknown}' after '--' for '{argv[0]}'."
+        )
+        assert "--trace" in message
+
+    def test_help_before_separator_wins(self, guard: ArgvGuard) -> None:
+        """Help never runs the command, so what follows does not matter."""
+        argv = ["index", "--help", "-", "search"]
+        assert guard.check(argv) == ["index", "--", "--help"]
+
+    def test_options_checked_before_separator(self,
+                                              guard: ArgvGuard) -> None:
+        """An error before the separator is reported first."""
+        with pytest.raises(UsageError, match="Unknown option '--nope'"):
+            guard.check(["index", "--nope", "1", "-", "search"])
+
+
+class TestPositionalParams:
+    """``positional``: the parameters Fire fills without an option."""
+
+    @pytest.mark.parametrize("argv, expected", [
+        (["index"], set()),
+        (["index", "patata"], {"max_chunk_size"}),
+        (["index", "500", "x"], {"max_chunk_size", "raw_dir"}),
+        (["index", "--max_chunk_size", "5"], set()),
+        (["index", "-m", "5", "x"], {"raw_dir"}),
+        (["index", "x", "--max_chunk_size", "5"], {"raw_dir"}),
+        (["index", "--raw_dir", "x", "5"], {"max_chunk_size"}),
+        (["search", "hola", "--k", "5"], {"query"}),
+        (["search", "--query", "hola", "5"], {"k"}),
+        (["index", "--help"], set()),
+        (["not_a_command", "x"], set()),
+    ])
+    def test_after_check(self, guard: ArgvGuard, argv: list[str],
+                         expected: set[str]) -> None:
+        """Positional values fill, in order, the parameters left free."""
+        guard.check(argv)
+        assert guard.positional == expected
+
+    def test_reset_between_checks(self, guard: ArgvGuard) -> None:
+        """A later check does not keep the previous result."""
+        guard.check(["index", "patata"])
+        guard.check(["index", "--max_chunk_size", "5"])
+        assert guard.positional == set()
+
+    def test_reset_on_error(self, guard: ArgvGuard) -> None:
+        """A rejected command line leaves nothing behind."""
+        guard.check(["index", "patata"])
+        with pytest.raises(UsageError):
+            guard.check(["index", "--nope", "1"])
+        assert guard.positional == set()
+
+
 class TestErrorType:
     """How ``main`` handles it."""
 
@@ -239,3 +397,38 @@ class TestRagCLI:
         """Typical typos in the subject's option names are caught."""
         with pytest.raises(UsageError):
             ArgvGuard(RagCLI).check(argv)
+
+    @pytest.mark.parametrize("argv, message", [
+        (["index", "--max_chunk_size", "500", "search"],
+         "'search' is a command, not a value for --raw_dir of 'index'"),
+        (["index", "search"],
+         "'search' is a command, not a value for --max_chunk_size of "
+         "'index'"),
+        (["search", "lora", "--k", "5", "index"],
+         "'index' is a command, not a value for --index_dir of 'search'"),
+        (["search_dataset", "--k", "5", "index"],
+         "'index' is a command, not a value for --dataset_path of "
+         "'search_dataset'"),
+        (["answer", "lora", "search"],
+         "'search' is a command, not a value for --k of 'answer'"),
+        (["index", "-", "search"],
+         "Unexpected arguments after '-' for 'index': search"),
+        (["index", "--", "--una_flag", "search"],
+         "Unknown Fire flag '--una_flag' after '--' for 'index'"),
+    ])
+    def test_second_command_rejected(self, argv: list[str],
+                                     message: str) -> None:
+        """A second command is refused before anything runs."""
+        with pytest.raises(UsageError, match=message):
+            ArgvGuard(RagCLI).check(argv)
+
+    @pytest.mark.parametrize("argv", [
+        ["search", "index"],
+        ["search", "--k", "5", "search"],
+        ["answer", "evaluate"],
+        ["index", "--index_dir", "search"],
+    ])
+    def test_command_words_as_values_accepted(self,
+                                              argv: list[str]) -> None:
+        """Searching for the word "index" or naming a folder "search"."""
+        assert ArgvGuard(RagCLI).check(argv) == argv

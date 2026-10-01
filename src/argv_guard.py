@@ -2,8 +2,10 @@
 
 Fire calls the command with the arguments it understands and only then
 complains about the rest, so a typo in an option (``--chunk_size``), too
-many arguments, or a ``--help`` after other arguments would run the whole
-command first. ``ArgvGuard`` catches those cases up front.
+many arguments, a second command written as a value (``index -m 500
+search``), text after a separator (``index - search``) or a ``--help``
+after other arguments would run the whole command first. ``ArgvGuard``
+catches those cases up front.
 """
 import inspect
 from typing import Any
@@ -12,10 +14,30 @@ from .exceptions import UsageError
 
 
 class ArgvGuard:
-    """Validate ``argv`` against the public methods of a Fire component."""
+    """Validate ``argv`` against the public methods of a Fire component.
+
+    Attributes:
+        SEPARATORS: ``-`` chains a call on the result of the command and
+            ``--`` starts Fire's own flags.
+        HELP_FLAGS: Ways of asking for help.
+        FIRE_FLAGS: Fire's own flags, the only ones allowed after ``--``.
+        FIRE_VALUE_FLAGS: Fire flags that may take a value.
+        FREE_TEXT_PARAMS: Parameters whose value is free text, so a
+            command name there is a real value (``search index``).
+        positional: Parameters that receive a value written without its
+            option, filled by the last ``check`` (``main`` passes it to
+            ``ArgError.describe``).
+    """
 
     SEPARATORS: frozenset[str] = frozenset({"--", "-"})
     HELP_FLAGS: frozenset[str] = frozenset({"--help", "-help", "-h"})
+    FIRE_FLAGS: frozenset[str] = frozenset({
+        "--help", "-h", "--interactive", "-i", "--trace", "-t",
+        "--verbose", "-v", "--completion", "--separator",
+    })
+    FIRE_VALUE_FLAGS: frozenset[str] = frozenset({"--completion",
+                                                  "--separator"})
+    FREE_TEXT_PARAMS: frozenset[str] = frozenset({"query"})
 
     def __init__(self, component: type[Any]) -> None:
         """Keep the class whose methods are the commands.
@@ -24,6 +46,7 @@ class ArgvGuard:
             component: The class given to ``fire.Fire``.
         """
         self._component = component
+        self.positional: set[str] = set()
 
     def check(self, argv: list[str]) -> list[str]:
         """Return the command line Fire should receive.
@@ -36,8 +59,11 @@ class ArgvGuard:
             was asked for, so the command is never run.
 
         Raises:
-            UsageError: Unknown option or too many arguments.
+            UsageError: Unknown option, too many arguments, a command
+                name given as a value, or text after a separator that
+                Fire would only reject after running the command.
         """
+        self.positional = set()
         if not argv or argv[0] not in self._commands():
             return argv
         command, args = argv[0], self._before_separator(argv[1:])
@@ -45,12 +71,99 @@ class ArgvGuard:
             return [command, "--", "--help"]
         params = self._params(command)
         named, positional = self._split(command, args, params)
-        if len(named) + positional > len(params):
+        if len(named) + len(positional) > len(params):
             raise UsageError(
                 f"Too many arguments for '{command}': it takes at most "
                 f"{len(params)} ({self._options(params)})"
             )
+        self._check_positional(command, named, positional, params)
+        self._check_after_separator(command, argv[1 + len(args):])
+        self.positional = self._positional_params(named, positional, params)
         return argv
+
+    @staticmethod
+    def _positional_params(named: set[str], positional: list[str],
+                           params: list[str]) -> set[str]:
+        """Parameters Fire fills with the positional arguments.
+
+        Fire gives them, in order, to the parameters not given as
+        options, wherever they are written on the command line.
+        """
+        free = [param for param in params if param not in named]
+        return set(free[:len(positional)])
+
+    def _check_positional(self, command: str, named: set[str],
+                          positional: list[str], params: list[str]) -> None:
+        """Reject a command name that Fire would take as a value.
+
+        Fire gives the positional arguments, in order, to the parameters
+        not given as options, wherever they are written: in ``index -m
+        500 search``, ``search`` becomes ``raw_dir``. A command name there
+        is almost surely a second command, except in free-text parameters.
+
+        Raises:
+            UsageError: A command name lands in a non free-text parameter.
+        """
+        free = [param for param in params if param not in named]
+        for value, param in zip(positional, free):
+            if value in self._commands() and \
+                    param not in self.FREE_TEXT_PARAMS:
+                raise UsageError(
+                    f"'{value}' is a command, not a value for --{param} "
+                    f"of '{command}'. Run one command at a time"
+                )
+
+    def _check_after_separator(self, command: str, rest: list[str]) -> None:
+        """Reject what Fire would only refuse after running the command.
+
+        - After ``-`` Fire calls the next words on the command's result;
+          the commands return nothing, so it fails once the work is done.
+        - After ``--`` Fire silently ignores anything that is not one of
+          its own flags.
+
+        Args:
+            command: The command being run.
+            rest: The separator and everything after it (may be empty).
+
+        Raises:
+            UsageError: Text after ``-``, or a non-Fire flag after ``--``.
+        """
+        if not rest:
+            return
+        separator, extra = rest[0], rest[1:]
+        if separator == "-":
+            if extra:
+                raise UsageError(
+                    f"Unexpected arguments after '-' for '{command}': "
+                    f"{' '.join(extra)}. Commands cannot be chained"
+                )
+            return
+        unknown = self._first_unknown_fire_flag(extra)
+        if unknown is not None:
+            raise UsageError(
+                f"Unknown Fire flag '{unknown}' after '--' for "
+                f"'{command}'. Valid flags: "
+                f"{', '.join(sorted(self.FIRE_FLAGS))}"
+            )
+
+    def _first_unknown_fire_flag(self, args: list[str]) -> str | None:
+        """First argument after ``--`` that is not a Fire flag or value.
+
+        ``--separator`` and ``--completion`` may take a value, written
+        with ``=`` or as the next argument.
+        """
+        position = 0
+        while position < len(args):
+            arg = args[position]
+            name, equals, _ = arg.partition("=")
+            if name not in self.FIRE_FLAGS:
+                return arg
+            if (name in self.FIRE_VALUE_FLAGS and not equals
+                    and position + 1 < len(args)
+                    and not args[position + 1].startswith("-")):
+                position += 1
+            position += 1
+        return None
 
     def _commands(self) -> set[str]:
         """Names of the public methods (the available commands)."""
@@ -73,19 +186,19 @@ class ArgvGuard:
         return args
 
     def _split(self, command: str, args: list[str],
-               params: list[str]) -> tuple[set[str], int]:
-        """Resolve the options and count the positional arguments.
+               params: list[str]) -> tuple[set[str], list[str]]:
+        """Resolve the options and collect the positional arguments.
 
         Returns:
-            The parameters given as options and the number of positional
-            arguments.
+            The parameters given as options and the positional arguments,
+            in order.
 
         Raises:
             UsageError: An option does not match any parameter, or a
                 non-boolean option has no value.
         """
         named: set[str] = set()
-        positional = 0
+        positional: list[str] = []
         position = 0
         while position < len(args):
             arg = args[position]
@@ -101,7 +214,7 @@ class ArgvGuard:
                             f"Option '{arg}' of '{command}' needs a value"
                         )
             else:
-                positional += 1
+                positional.append(arg)
             position += 1
         return named, positional
 

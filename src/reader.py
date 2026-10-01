@@ -1,3 +1,4 @@
+"""Read the corpus files that will be indexed."""
 from pathlib import Path
 
 from tqdm import tqdm
@@ -7,19 +8,41 @@ from .models import CorpusReadResult, Document
 
 
 class CorpusReader:
+    """Read the text files of a corpus folder.
+
+    Paths are stored relative to the project root (``data/raw/...``),
+    the form the moulinette compares verbatim.
+
+    Attributes:
+        EXTENSIONS: File types that are read.
+        PROJECT_ROOT: Folder the stored paths are relative to.
+    """
+
     EXTENSIONS: frozenset[str] = frozenset({".py", ".md", ".txt"})
     PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 
     def __init__(self, path_to_read: Path | str) -> None:
+        """Store the folder to read.
+
+        Args:
+            path_to_read: Corpus folder; relative paths are resolved
+                from the working directory.
+        """
         self._path_to_read = Path(path_to_read).resolve()
 
     def _list_files(self) -> list[Path]:
+        """Files of the folder, recursively, with a valid extension."""
         return sorted(
             path for path in self._path_to_read.rglob("*")
             if path.suffix in self.EXTENSIONS and path.is_file()
         )
 
     def _relative_path(self, file: Path) -> str:
+        """Path of ``file`` relative to the project root, with ``/``.
+
+        Raises:
+            CorpusError: The file is outside the project root.
+        """
         try:
             return file.relative_to(self.PROJECT_ROOT).as_posix()
         except ValueError as e:
@@ -29,6 +52,7 @@ class CorpusReader:
             ) from e
 
     def _read_file(self, file: Path) -> Document | None:
+        """Read one file as UTF-8, or return None if it cannot be read."""
         try:
             text = file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -36,6 +60,15 @@ class CorpusReader:
         return Document(file_path=self._relative_path(file), text=text)
 
     def read(self) -> CorpusReadResult:
+        """Read every valid file of the folder, with a progress bar.
+
+        Returns:
+            The documents read and the paths of the skipped files.
+
+        Raises:
+            CorpusError: The folder does not exist, is outside the
+                project root, or has no readable file.
+        """
         if not self._path_to_read.is_dir():
             raise CorpusError(
                 f"Corpus folder not found: {self._path_to_read}"

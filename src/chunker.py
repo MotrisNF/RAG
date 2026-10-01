@@ -1,3 +1,4 @@
+"""Split corpus documents into chunks small enough to retrieve."""
 from abc import ABC, abstractmethod
 
 from tqdm import tqdm
@@ -6,7 +7,18 @@ from .models import Document, Chunk
 
 
 class BaseChunker(ABC):
+    """Common base of the chunkers: size check and batch chunking."""
+
     def __init__(self, max_chunk_size: int) -> None:
+        """Store the maximum chunk size.
+
+        Args:
+            max_chunk_size: Maximum length of a chunk, in characters.
+
+        Raises:
+            TypeError: ``max_chunk_size`` is not an integer.
+            ValueError: ``max_chunk_size`` is lower than 1.
+        """
         if (not isinstance(max_chunk_size, int)
                 or isinstance(max_chunk_size, bool)):
             raise TypeError(
@@ -22,9 +34,24 @@ class BaseChunker(ABC):
 
     @abstractmethod
     def chunk_document(self, doc: Document) -> list[Chunk]:
-        pass
+        """Split one document into chunks.
+
+        Args:
+            doc: The document to split.
+
+        Returns:
+            Its chunks, in file order.
+        """
 
     def chunk_documents(self, docs: list[Document]) -> list[Chunk]:
+        """Split every document, with a progress bar.
+
+        Args:
+            docs: The documents to split.
+
+        Returns:
+            The chunks of all the documents, in order.
+        """
         chunk_list: list[Chunk] = []
         for doc in tqdm(docs, desc="Chunking files", unit="file"):
             chunk_list.extend(self.chunk_document(doc))
@@ -33,9 +60,31 @@ class BaseChunker(ABC):
 
 
 class FixedSizeChunker(BaseChunker):
+    """Cut text into chunks of at most ``max_chunk_size`` characters.
+
+    Each cut is moved back to the last separator found in the second
+    half of the chunk, so chunks tend to end at a blank line, a line or
+    a word instead of in the middle of one.
+
+    Attributes:
+        SEPARATORS: Preferred cut points, best first.
+    """
+
     SEPARATORS: tuple[str, ...] = ("\n\n", "\n", " ")
 
     def _find_cut(self, text: str, start: int, end: int, size: int) -> int:
+        """Position where the chunk ``text[start:end]`` should end.
+
+        Args:
+            text: The whole document.
+            start: Start of the chunk.
+            end: Furthest allowed end.
+            size: Maximum chunk size.
+
+        Returns:
+            The position just after the best separator in the second
+            half of the chunk, or ``end`` if there is none.
+        """
         for separator in self.SEPARATORS:
             position = text.rfind(separator, start, end)
 
@@ -45,6 +94,16 @@ class FixedSizeChunker(BaseChunker):
         return end
 
     def chunk_document(self, doc: Document) -> list[Chunk]:
+        """Split one document into consecutive chunks.
+
+        Chunks that are only whitespace are dropped.
+
+        Args:
+            doc: The document to split.
+
+        Returns:
+            Its chunks, in file order, with their character ranges.
+        """
         text = doc.text
         size = self._max_chunk_size
         chunk_list: list[Chunk] = []
