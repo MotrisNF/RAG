@@ -95,7 +95,8 @@ class TestTokenizer:
     def test_pattern_compiled_once(self) -> None:
         """The patterns are shared, precompiled class attributes."""
         assert Tokenizer.PATTERN is Tokenizer().PATTERN
-        assert Tokenizer.COMPLEX_PATTERN is Tokenizer().COMPLEX_PATTERN
+        assert Tokenizer.DOT_PATTERN is Tokenizer().DOT_PATTERN
+        assert Tokenizer.SNAKE_PATTERN is Tokenizer().SNAKE_PATTERN
 
 
 class TestDottedTerms:

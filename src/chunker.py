@@ -181,3 +181,20 @@ class PyChunker(FixedSizeChunker):
         "\n    def ",
         "\n    async def ",
     })
+
+
+class MdChunker(FixedSizeChunker):
+    SEPARATORS: tuple[str, ...] = (
+        "\n#",
+        "\n##",
+        "\n### ",
+        "\n\n",
+        "\n",
+        " ",
+    )
+
+    CUT_BEFORE: frozenset[str] = frozenset({
+        "\n#",
+        "\n##",
+        "\n### ",
+    })
