@@ -5,25 +5,30 @@ import re
 class Tokenizer:
     """Split text into lowercase terms for BM25.
 
-    Two passes over the lowercase text:
+    Three passes over the lowercase text:
 
     1. ``PATTERN``: every run of letters or digits
        (``llm.generate()`` → ``llm``, ``generate``).
-    2. ``COMPLEX_PATTERN``: dotted names kept whole as extra terms
+    2. ``DOT_PATTERN``: dotted names kept whole as extra terms
        (``llm.generate``, ``vllm.entrypoints.openai``), so a question
        that quotes a module or a method matches it exactly, while the
        parts still match a question that only names one of them.
+    3. ``SNAKE_PATTERN``: snake_case names kept whole as extra terms
+       (``max_model_len``), for the same reason.
 
-    The two passes never produce the same term (the second one always
-    contains a dot), so nothing is counted twice. The same tokenizer must
-    be used for the chunks and the queries, or their terms would never
-    match: rebuild the index after changing it.
+    The passes never produce the same term (the second one always
+    contains a dot, the third one an underscore and no dot), so nothing
+    is counted twice. The same tokenizer must be used for the chunks and
+    the queries, or their terms would never match: rebuild the index
+    after changing it.
 
     Attributes:
         PATTERN: A term is a run of lowercase letters or digits.
-        COMPLEX_PATTERN: Two or more runs of letters, digits or ``_``
-            joined by dots (also catches versions like ``0.10.1`` and
-            file names like ``lora.md``).
+        DOT_PATTERN: Two or more runs of letters, digits or ``_`` joined
+            by dots (also catches versions like ``0.10.1`` and file names
+            like ``lora.md``).
+        SNAKE_PATTERN: Two or more runs of letters or digits joined by
+            single underscores (``__init__`` or ``a__b`` do not match).
     """
 
     PATTERN = re.compile(r"[a-z0-9]+")
@@ -39,9 +44,8 @@ class Tokenizer:
             text: Any text.
 
         Returns:
-            The terms of the first pass in text order, followed by the
-            dotted terms of the second pass in text order. Empty when
-            there are none.
+            The plain terms, then the dotted names, then the snake_case
+            names, each group in text order. Empty when there are none.
         """
         low_text = text.lower()
         return (self.PATTERN.findall(low_text)

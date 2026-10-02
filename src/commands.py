@@ -215,7 +215,7 @@ class RagCLI:
                 first_character_index=hit.chunk.first_character_index,
                 last_character_index=hit.chunk.last_character_index,
             )
-            for hit in bm25.search(question.question, k)
+            for hit in tqdm(bm25.search(question.question, k))
         ]
         return MinimalSearchResults(
             question_id=question.question_id,

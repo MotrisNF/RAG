@@ -35,12 +35,17 @@ def make_chunks(*texts: str) -> list[Chunk]:
 
 
 class Reference:
-    """Naive BM25 straight from the formula, for comparison."""
+    """Naive BM25 straight from the formula, for comparison.
 
-    def __init__(self, texts: list[str]) -> None:
-        """Tokenize every text once."""
+    Like ``build``, a chunk's terms are those of its text plus those of
+    its file path.
+    """
+
+    def __init__(self, chunks: list[Chunk]) -> None:
+        """Tokenize every chunk (text and path) once."""
         tokenizer = Tokenizer()
-        self.docs = [tokenizer.tokenize(t) for t in texts]
+        self.docs = [tokenizer.tokenize(c.text)
+                     + tokenizer.tokenize(c.file_path) for c in chunks]
         self.n = len(self.docs)
         self.avg = sum(len(d) for d in self.docs) / self.n
 
@@ -70,7 +75,7 @@ class TestTokenizer:
     @pytest.mark.parametrize("text, tokens", [
         ("How do I load a LoRA adapter?",
          ["how", "do", "i", "load", "a", "lora", "adapter"]),
-        ("max_model_len", ["max", "model", "len"]),
+        ("max_model_len", ["max", "model", "len", "max_model_len"]),
         ("vllm.entrypoints.openai",
          ["vllm", "entrypoints", "openai", "vllm.entrypoints.openai"]),
         ("--max-num-seqs=256", ["max", "num", "seqs", "256"]),
@@ -84,13 +89,18 @@ class TestTokenizer:
         """Lowercase, split on anything that is not a letter or digit."""
         assert Tokenizer().tokenize(text) == tokens
 
-    def test_keeps_order_and_repeats(self) -> None737:
+    def test_keeps_order_and_repeats(self) -> None:
         """Order and repetitions are kept (counts matter for BM25)."""
         assert Tokenizer().tokenize("b a b") == ["b", "a", "b"]
-737
+
     def test_non_ascii_letters_split(self) -> None:
         """Only ``a-z``: accented letters act as separators."""
         assert Tokenizer().tokenize("café") == ["caf"]
+
+    def test_pass_order(self) -> None:
+        """Plain terms, then dotted names, then snake_case names."""
+        assert Tokenizer().tokenize("self.max_len") == [
+            "self", "max", "len", "self.max_len", "max_len"]
 
     def test_pattern_compiled_once(self) -> None:
         """The patterns are shared, precompiled class attributes."""
@@ -115,10 +125,13 @@ class TestDottedTerms:
         ("a.b.c.d", ["a.b.c.d"]),
     ])
     def test_extra_terms(self, text: str, dotted: list[str]) -> None:
-        """The dotted names, lowercase, in order, after the plain terms."""
+        """The dotted names, lowercase, in order, right after the plain
+        terms (the snake_case names come after them).
+        """
         tokens = Tokenizer().tokenize(text)
+        plain = Tokenizer.PATTERN.findall(text.lower())
         assert [t for t in tokens if "." in t] == dotted
-        assert tokens[len(tokens) - len(dotted):] == dotted
+        assert tokens[len(plain):len(plain) + len(dotted)] == dotted
 
     @pytest.mark.parametrize("text", [
         "no dots here", "max_model_len", "end of sentence. Next one",
@@ -153,6 +166,60 @@ class TestDottedTerms:
         assert dotted == ["a.b", "d.e", "h.i_j"]
 
 
+class TestSnakeTerms:
+    """Third pass: snake_case names are also kept whole."""
+
+    @pytest.mark.parametrize("text, snake", [
+        ("max_model_len", ["max_model_len"]),
+        ("MAX_MODEL_LEN", ["max_model_len"]),
+        ("x_1 y_2_z", ["x_1", "y_2_z"]),
+        ("self.max_model_len", ["max_model_len"]),
+        ("api_server.py", ["api_server"]),
+        ("set gpu_memory_utilization=0.9", ["gpu_memory_utilization"]),
+    ])
+    def test_extra_terms(self, text: str, snake: list[str]) -> None:
+        """The snake_case names, lowercase, in order, at the end."""
+        tokens = Tokenizer().tokenize(text)
+        assert tokens[len(tokens) - len(snake):] == snake
+
+    @pytest.mark.parametrize("text", [
+        "__init__", "_private", "foo_", "a__b", "no underscores", "",
+    ])
+    def test_no_snake_term(self, text: str) -> None:
+        """Underscores need a letter or digit on both sides."""
+        assert all("_" not in t for t in Tokenizer().tokenize(text))
+
+    def test_parts_and_whole(self) -> None:
+        """Both the parts and the whole name are terms."""
+        assert Tokenizer().tokenize("max_len") == ["max", "len", "max_len"]
+
+    def test_repetitions_kept(self) -> None:
+        """A snake_case name written twice counts twice (BM25 tf)."""
+        tokens = Tokenizer().tokenize("max_len and max_len")
+        assert tokens.count("max_len") == 2
+
+    def test_never_duplicates_other_passes(self) -> None:
+        """Snake terms have ``_`` and no dot: never a plain or dotted
+        term.
+        """
+        tokens = Tokenizer().tokenize("a_b c.d_e f")
+        plain = Tokenizer.PATTERN.findall("a_b c.d_e f")
+        dotted = Tokenizer.DOT_PATTERN.findall("a_b c.d_e f")
+        snake = tokens[len(plain) + len(dotted):]
+        assert snake == ["a_b", "d_e"]
+        assert not set(snake) & (set(plain) | set(dotted))
+
+    def test_exact_name_ranks_first(self) -> None:
+        """A question quoting ``max_model_len`` prefers the chunk that
+        writes it, over a chunk with the words apart.
+        """
+        index = BM25Index.build(make_chunks(
+            "The max length of the model and its len.",
+            "Set max_model_len to limit the context."))
+        hits = index.search("What is max_model_len?", 2)
+        assert hits[0].chunk.text == "Set max_model_len to limit the context."
+
+
 class TestDottedSearch:
     """The dotted terms change the ranking as intended."""
 
@@ -177,7 +244,14 @@ class TestDottedSearch:
 
 
 class TestBuild:
-    """What ``build`` stores."""
+    """What ``build`` stores.
+
+    Each chunk is indexed with the terms of its text plus those of its
+    file path. ``make_chunks`` paths (``data/raw/0.md``) add 5 terms:
+    ``data``, ``raw``, ``0``, ``md`` and ``0.md``.
+    """
+
+    PATH_TERMS = 5
 
     def test_postings(self) -> None:
         """term → {chunk position: occurrences}."""
@@ -189,11 +263,28 @@ class TestBuild:
         assert "missing" not in index._postings
 
     def test_lengths_and_average(self) -> None:
-        """Token counts per chunk and their mean."""
+        """Token counts per chunk (text + path) and their mean."""
         index = BM25Index.build(make_chunks("a b c d", "e f"))
-        assert index._lengths == [4, 2]
-        assert index._avg_length == 3.0
+        assert index._lengths == [4 + self.PATH_TERMS, 2 + self.PATH_TERMS]
+        assert index._avg_length == 3.0 + self.PATH_TERMS
         assert index._n_chunks == 2
+
+    def test_path_terms_indexed(self) -> None:
+        """The file path is searchable even when the text never says it."""
+        chunk = Chunk(file_path="data/raw/vllm/models/keye.py",
+                      first_character_index=0, last_character_index=9,
+                      text="class Foo")
+        index = BM25Index.build([chunk])
+        assert index._postings["keye"] == {0: 1}
+        assert index._postings["keye.py"] == {0: 1}
+        assert index.search("keye", 1)[0].chunk == chunk
+
+    def test_path_terms_not_in_text(self) -> None:
+        """Only the indexed terms change: text and offsets stay."""
+        chunks = make_chunks("a b")
+        index = BM25Index.build(chunks)
+        assert index._chunks[0].text == "a b"
+        assert index._chunks == chunks
 
     def test_chunks_kept_in_order(self) -> None:
         """Chunk ids are positions in the given list."""
@@ -202,9 +293,9 @@ class TestBuild:
         assert index._chunks == chunks
 
     def test_chunk_without_tokens_allowed(self) -> None:
-        """A symbols-only chunk is fine if others have text."""
+        """A symbols-only text is fine: its path still gives terms."""
         index = BM25Index.build(make_chunks("---", "real text"))
-        assert index._lengths == [0, 2]
+        assert index._lengths == [self.PATH_TERMS, 2 + self.PATH_TERMS]
 
     def test_no_chunks(self) -> None:
         """Nothing to index: clear error instead of dividing by zero."""
@@ -212,9 +303,14 @@ class TestBuild:
             BM25Index.build([])
 
     def test_only_symbols(self) -> None:
-        """Chunks exist but have no tokens: same error."""
+        """Chunks exist but neither text nor path has a term: same
+        error.
+        """
+        chunks = [Chunk(file_path="/-/", first_character_index=0,
+                        last_character_index=len(text), text=text)
+                  for text in ("---", "``` ***")]
         with pytest.raises(IndexBuildError, match="2 chunks, 0 tokens"):
-            BM25Index.build(make_chunks("---", "``` ***"))
+            BM25Index.build(chunks)
 
     def test_error_is_rag_error(self) -> None:
         """``main`` handles it as a project error."""
@@ -249,14 +345,16 @@ class TestTermScore:
 
     @pytest.fixture
     def index(self) -> BM25Index:
-        """Chunks of lengths 2, 4 and 12 (average 6)."""
+        """Chunks of lengths 2, 4 and 12, plus 5 path terms each: 7, 9
+        and 17 (average 11).
+        """
         return BM25Index.build(make_chunks(
             "a b", "a b c d", " ".join(["w"] * 12)))
 
     def test_matches_formula(self, index: BM25Index) -> None:
         """Same value as the written formula."""
         k1, b = BM25Index.K1, BM25Index.B
-        expected = 2.0 * 3 * (k1 + 1) / (3 + k1 * (1 - b + b * 4 / 6))
+        expected = 2.0 * 3 * (k1 + 1) / (3 + k1 * (1 - b + b * 9 / 11))
         assert index._term_score(2.0, 3, 1) == pytest.approx(expected)
 
     def test_grows_with_tf(self, index: BM25Index) -> None:
@@ -304,7 +402,7 @@ class TestSearch:
 
     def test_scores_match_reference(self, index: BM25Index) -> None:
         """Every score equals the naive reference implementation."""
-        reference = Reference(self.TEXTS)
+        reference = Reference(make_chunks(*self.TEXTS))
         query = "configure the openai server"
         for hit in index.search(query, 5):
             doc_id = self.TEXTS.index(hit.chunk.text)

@@ -224,3 +224,4 @@ class BM25Index:
             raise DatasetError(str(path), e) from e
 
         return cls(data.chunks, data.postings, data.lengths)
+
