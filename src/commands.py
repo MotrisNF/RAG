@@ -15,7 +15,7 @@ from pydantic import (BaseModel, ConfigDict, Field, FilePath, ValidationError,
 from tqdm import tqdm
 
 from .bm25_index import BM25Index
-from .chunker import FixedSizeChunker
+from .chunker import FixedSizeChunker, MdChunker, PyChunker
 from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
                          PathError, ResultsEvaluationError)
 from .evaluator import Evaluator
@@ -133,8 +133,19 @@ class RagCLI:
             for path in result.skipped:
                 print(f"  {path}")
 
-        chunker = FixedSizeChunker(max_chunk_size)
-        chunks = chunker.chunk_documents(result.documents)
+        chunkerpy = PyChunker(max_chunk_size)
+        chunkermd = MdChunker(max_chunk_size)
+        chunkspy = chunkerpy.chunk_documents(
+            [doc for doc in result.documents
+             if doc.file_path.endswith(".py")]
+            )
+        chunksmd = chunkermd.chunk_documents(
+            [doc for doc in result.documents
+             if doc.file_path.endswith(".md")]
+            + [doc for doc in result.documents
+                if doc.file_path.endswith(".txt")]
+        )
+        chunks = chunkspy + chunksmd
 
         print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
         bm25 = BM25Index.build(chunks)
@@ -215,7 +226,7 @@ class RagCLI:
                 first_character_index=hit.chunk.first_character_index,
                 last_character_index=hit.chunk.last_character_index,
             )
-            for hit in tqdm(bm25.search(question.question, k))
+            for hit in bm25.search(question.question, k)
         ]
         return MinimalSearchResults(
             question_id=question.question_id,
