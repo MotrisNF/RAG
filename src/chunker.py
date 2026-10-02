@@ -158,6 +158,9 @@ class PyChunker(FixedSizeChunker):
         CUT_BEFORE: The definition separators. The cut goes right after
             their leading newline, so ``@``, ``class`` or ``def`` begins
             the next chunk.
+        DEFINITION_STARTS: Line starts (after the indentation) of a
+            definition or a decorator: a cut right before one of them is
+            moved back over the decorators above it.
     """
 
     SEPARATORS: tuple[str, ...] = (
@@ -181,20 +184,76 @@ class PyChunker(FixedSizeChunker):
         "\n    def ",
         "\n    async def ",
     })
+    DEFINITION_STARTS: tuple[str, ...] = ("@", "def ", "async def ",
+                                          "class ")
+
+    def _find_cut(self, text: str, start: int, end: int, size: int) -> int:
+        """Cut like ``FixedSizeChunker``, then keep decorators with their
+        definition.
+
+        When the cut lands right before a definition or a decorator, it is
+        moved back over the single-line decorators just above it
+        (``@a\\n@b\\ndef f():``), so they start the next chunk with what
+        they decorate. A decorator in the first half of the window is not
+        a cut candidate by itself, so without this step the cut would
+        fall between it and its ``def``.
+
+        Args:
+            text: The whole document.
+            start: Start of the chunk.
+            end: Furthest allowed end.
+            size: Maximum chunk size.
+
+        Returns:
+            The position where the chunk should end; always after
+            ``start``, so the chunking always advances. If the decorators
+            reach back to ``start`` (the whole chunk would be decorators),
+            the cut is not moved.
+        """
+        cut = super()._find_cut(text, start, end, size)
+        if text[cut - 1] != "\n":
+            return cut
+        line_end = text.find("\n", cut)
+        line = text[cut:line_end if line_end != -1 else len(text)]
+        if not line.lstrip(" ").startswith(self.DEFINITION_STARTS):
+            return cut
+
+        moved = cut
+        while True:
+            previous = max(text.rfind("\n", start, moved - 1) + 1, start)
+            if not text[previous:moved].lstrip(" ").startswith("@"):
+                return moved
+            if previous == start:
+                return cut
+            moved = previous
 
 
 class MdChunker(FixedSizeChunker):
+    """Cut Markdown and plain text preferably right after a fenced code
+    block closes.
+
+    This is the "Markdown / text" strategy of the subject: ``index`` uses
+    it for ``.md`` and ``.txt`` files. A code block (``` ... ```) is kept
+    whole when it fits, instead of being split in the middle of a command
+    or a snippet; text without code blocks is cut like
+    ``FixedSizeChunker`` (blank line, newline, space). Cutting before
+    headings was measured too and lost ~4 points of docs recall@5 (see
+    README → Performance), so headings are not separators.
+
+    Attributes:
+        SEPARATORS: Preferred cut points, best first: the end of a code
+            block (``\\n```\\n``), then a blank line, a newline and a
+            space.
+        CUT_BEFORE: Empty: every cut goes after its separator. In the
+            vLLM docs, almost every opening fence carries a language
+            (```bash, ```python): ``\\n```\\n`` matches the closing ones,
+            so the block stays in the chunk it closes.
+    """
+
     SEPARATORS: tuple[str, ...] = (
-        "\n###",
-        "\n##",
-        "\n#",
+        "\n```\n",
         "\n\n",
         "\n",
         " ",
-    )
-
-    CUT_BEFORE: frozenset[str] = frozenset({
-        "\n###",
-        "\n##",
-        "\n#",
-    })
+        )
+    CUT_BEFORE: frozenset[str] = frozenset()

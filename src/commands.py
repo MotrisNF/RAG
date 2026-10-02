@@ -15,7 +15,7 @@ from pydantic import (BaseModel, ConfigDict, Field, FilePath, ValidationError,
 from tqdm import tqdm
 
 from .bm25_index import BM25Index
-from .chunker import FixedSizeChunker, MdChunker, PyChunker
+from .chunker import MdChunker, PyChunker
 from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
                          PathError, ResultsEvaluationError)
 from .evaluator import Evaluator
@@ -107,8 +107,9 @@ class RagCLI:
         """Read the corpus in raw_dir, build the search index, save it.
 
         Steps: read the files (CorpusReader), split them into chunks
-        (FixedSizeChunker), build the BM25 index and save it in index_dir,
-        where the search commands load it from.
+        (PyChunker for Python, MdChunker for Markdown and text), build the
+        BM25 index and save it in index_dir, where the search commands
+        load it from.
 
         Args:
             max_chunk_size: Maximum length of a chunk, in characters (the
@@ -134,21 +135,16 @@ class RagCLI:
                 print(f"  {path}")
 
         chunkerpy = PyChunker(max_chunk_size)
-        #chunkermd = MdChunker(max_chunk_size)
-        chunkertxt = FixedSizeChunker(max_chunk_size)
+        chunkermd = MdChunker(max_chunk_size)
         chunkspy = chunkerpy.chunk_documents(
             [doc for doc in result.documents
              if doc.file_path.endswith(".py")]
             )
-        chunksmd = chunkertxt.chunk_documents(
+        chunksmd = chunkermd.chunk_documents(
             [doc for doc in result.documents
-             if doc.file_path.endswith(".md")]
+             if doc.file_path.endswith((".md", ".txt"))]
         )
-        chunkstxt = chunkertxt.chunk_documents(
-            [doc for doc in result.documents
-                if doc.file_path.endswith(".txt")]
-        )
-        chunks = chunkspy + chunksmd + chunkstxt
+        chunks = chunkspy + chunksmd
 
         print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
         bm25 = BM25Index.build(chunks)

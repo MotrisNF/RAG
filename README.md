@@ -165,3 +165,104 @@ Questions not found within k = 5 (`evaluate --show_failed`, same list as the mou
 | hard | 2000 | 0.538 | 0.692 | 0.769 |
 
 Hard questions missed (chunk 500): `hard-01`, `hard-02`, `hard-04`, all **paraphrases** (no or few words in common with the answer): the limit of a lexical method, target of the semantic-embeddings bonus. `hard-02` finds the right file first but not the right region (IoU).
+
+### Ablation of the 2026-10-02 changes (chunk 2000, k = 10, recall@5)
+
+Configuration measured ("current"): `PyChunker` for `.py`, `FixedSizeChunker` for `.md` / `.txt` (`MdChunker` written but not active), **full file path** added to the indexed terms, tokenizer with three passes (plain terms + dotted names + snake_case names), BM25 `K1 = 1.9`, `B = 0.5`. Each row removes or changes **one** thing from it.
+
+| Configuration | docs @1 | docs @5 | code @1 | code @5 | mini hard @5 | Effect of that change |
+|---|---|---|---|---|---|---|
+| Baseline (2026-10-01) | 0.61 | 0.850 | 0.31 | 0.596 | 0.769 | |
+| **Current** | 0.63 | **0.830** | 0.44 | **0.727** | 0.769 | |
+| Current − file path | 0.58 | 0.870 | 0.39 | 0.636 | 0.769 | path: code +9, **docs −4** |
+| Current − snake_case pass | 0.62 | 0.820 | 0.42 | 0.657 | 0.769 | snake_case: **code +7**, docs ±1 |
+| Current − dotted pass | 0.65 | 0.830 | 0.48 | 0.717 | 0.769 | neutral |
+| Current with `K1/B = 1.5/0.75` | 0.65 | 0.820 | 0.47 | 0.727 | 0.769 | neutral |
+| Current with `FixedSizeChunker` for `.py` | 0.64 | 0.830 | 0.47 | 0.747 | 0.769 | noise (±2) |
+| Current + `MdChunker` for `.md` | 0.61 | 0.770 | 0.45 | 0.727 | 0.769 | **docs −6** |
+
+**Why the path lowers docs.** Adding the path only to `.py` chunks gives the same docs 0.830: the damage does not come from the paths of the Markdown files but from **code chunks taking top-5 slots from the documentation**. Many code paths contain words of docs questions (`vllm/lora/…`, `…/quantization/…`, `…/entrypoints/openai/…`), so every chunk of those files scores on them even when its text is unrelated.
+
+**Which part of the path to index:**
+
+| Indexed part of the path | docs @5 | code @5 |
+|---|---|---|
+| Full path (current) | 0.830 | 0.727 |
+| **File name only** (`keye`, `fused_batched_moe`) | **0.860** | **0.717** |
+| Parent folder + file name | 0.850 | 0.717 |
+| No path | 0.870 | 0.636 |
+
+The useful words of the path are usually in the **file name** (`keye`, `sampler`, `pynccl`); the ones that steal slots are usually **folders** (`lora`, `quantization`, `entrypoints`). File name only keeps almost all the code gain (−1 question) and recovers docs. 35 of the 99 code questions contain words that appear only in the path of their file, not in the text of the right chunk.
+
+### Markdown chunking (with file name only in the indexed terms)
+
+| `.md` chunker | docs @1 | docs @5 | code @5 |
+|---|---|---|---|
+| `FixedSizeChunker` | 0.61 | **0.860** | 0.717 |
+| `MdChunker` (separators `\n###`, `\n##`, `\n#`, no space) | 0.60 | 0.820 | 0.717 |
+| Headings with a space (`\n# ` > `\n## ` > `\n### `) | 0.63 | 0.820 | 0.717 |
+| Headings with a space, deepest first (`\n### ` > `\n## ` > `\n# `) | 0.62 | 0.820 | 0.717 |
+| One chunk per section (cut at every heading, long sections split like `FixedSizeChunker`) | 0.58 | 0.820 | 0.717 |
+| One chunk per section, no path | 0.58 | 0.820 | 0.636 |
+
+- Every heading-based variant loses ~4 points on docs against `FixedSizeChunker`.
+- **79 of the 100 docs ground-truth sources start exactly at a heading**: the dataset was built by sections, so heading cuts should help in theory. Why they do not is still open (next idea: the interaction with `B`, since sections have very different lengths).
+- Questions lost with heading cuts (one section per chunk vs fixed): mostly *right file, IoU < 0.05*: short sources (95–162 characters) whose chunk moved, sometimes just below the threshold (IoU 0.046, 0.048).
+- Separators without a space (`\n#`) also match comment lines inside code blocks: the `.md` files have 1,287 real headings and 137 `# comment` lines in fenced code. No measurable effect on recall, but they should have the space.
+
+**Decision so far:** index the file name only (best balance: docs 0.860 / code 0.717); keep the snake_case pass (main code gain); dotted pass and `K1/B` have no measurable effect. A Markdown-specific chunker is mandatory: with it docs is at 0.820, above the 0.80 target but with little margin, so it still needs work.
+
+### Code-fence separator for Markdown (2026-10-02)
+
+Idea: in technical docs the structure that breaks worst when chunking is the fenced code block (a command or a snippet split in two). New `MdChunker` separators: `\n```\n` (end of a code block, cut **after** it), then `\n\n`, `\n`, space; no heading separators, `CUT_BEFORE` empty.
+
+In the vLLM docs almost every opening fence has a language (820 ` ```bash `/` ```python `… vs 2 bare ` ``` ` openings, 822 closings), so `\n```\n` matches closing fences: the block stays whole in the chunk it closes. Only 56 of 648 Markdown chunks (2000 characters) still end inside a code block (blocks longer than the chunk size).
+
+With **file name only** in the indexed terms (experiment):
+
+| `.md` chunker | docs @1 | **docs @5** | code @5 |
+|---|---|---|---|
+| `FixedSizeChunker` | 0.61 | 0.860 | 0.717 |
+| Headings with a space | 0.63 | 0.820 | 0.717 |
+| Headings + `\n```\n` | 0.62 | 0.830 | 0.717 |
+| `\n```\n` first, then headings | 0.60 | 0.860 | 0.717 |
+| **`\n```\n` only (no headings)** | 0.61 | **0.880** | 0.717 |
+
+**Implemented** (`MdChunker` for `.md`, `PyChunker` for `.py`, `FixedSizeChunker` for `.txt`), measured with the moulinette on the real code as it is (full file path in the indexed terms, three-pass tokenizer, `K1 = 1.9`, `B = 0.5`):
+
+| Dataset | Recall@1 | Recall@3 | **Recall@5** | Recall@10 | Before this change (@5) |
+|---|---|---|---|---|---|
+| docs | 0.640 | 0.820 | **0.860** | 0.910 | 0.830 |
+| code | 0.465 | 0.677 | **0.727** | 0.798 | 0.727 |
+
+12,881 chunks. Docs back above the baseline (0.850) with a 6-point margin over the 0.80 target; code keeps its gain (+13 points over the baseline). Heading cuts stay out: every heading variant measured lower.
+
+### Tokenizer without the dotted pass, `.txt` with `MdChunker` (2026-10-02)
+
+The dotted pass (`llm.generate`, `lora.md` kept whole) was removed: it only added terms and indexing time. `.txt` files now go to `MdChunker`, so there are exactly the two strategies of the subject (Python / Markdown-text); the 28 `.txt` files have no code blocks, so their chunks do not change. Moulinette, chunk 2000, k = 10:
+
+| Dataset | Recall@1 | Recall@3 | **Recall@5** | Recall@10 |
+|---|---|---|---|---|
+| docs | 0.630 | 0.810 | **0.860** | 0.910 |
+| code | 0.495 | 0.677 | **0.717** | 0.798 |
+
+12,881 chunks. Code @5 drops 1 question (0.727 → 0.717), docs unchanged.
+
+### Decorators kept with their definition (2026-10-02)
+
+`PyChunker` moves a cut that lands before a `def`/`class`/decorator back over the `@` lines just above it. Chunks ending with a decorator line: **406 → 1** (of ~10,500 `.py` chunks); 12,907 chunks in total. Recall unchanged (docs @5 0.860, code @5 0.717): it makes chunks cleaner (and better context for the LLM), not easier to find.
+
+### Chunk overlap (experiment, not implemented)
+
+Each chunk starts `N` characters before the end of the previous one (aligned to a newline). Recall@5:
+
+| Overlap | Chunks | docs @5 | code @5 | code @10 |
+|---|---|---|---|---|
+| 0 (current) | 12,881 | **0.86** | 0.717 | 0.798 |
+| 200, all files | 14,340 | 0.83 | 0.737 | 0.798 |
+| 400, all files | 16,067 | 0.80 | 0.747 | 0.838 |
+| 200, `.py` only | 14,282 | 0.85 | **0.758** | 0.788 |
+| 400, `.py` only | 15,931 | 0.86 | 0.747 | 0.838 |
+| 600, `.py` only | 18,226 | 0.85 | 0.727 | 0.798 |
+
+On all files it hurts docs: two almost identical neighbour chunks take two of the five slots. On `.py` only it gains 1–4 code questions, but the gain does not grow with the overlap (200 > 400 > 600), so it is close to noise (~1 question = 1 %). Not worth it for now: both targets are already met with margin, and it would break the "chunks never overlap" invariant.

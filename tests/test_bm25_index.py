@@ -55,11 +55,13 @@ class Reference:
         return log((self.n - df + 0.5) / (df + 0.5) + 1)
 
     def score(self, query: str, doc_id: int) -> float:
-        """Sum over the distinct query terms present in the document."""
+        """Sum over the distinct query terms (stopwords dropped, like
+        ``search``) present in the document.
+        """
         doc = self.docs[doc_id]
         counts = Counter(doc)
         total = 0.0
-        for term in set(Tokenizer().tokenize(query)):
+        for term in set(Tokenizer().tokenize_query(query)):
             tf = counts[term]
             if tf == 0:
                 continue
@@ -76,8 +78,8 @@ class TestTokenizer:
         ("How do I load a LoRA adapter?",
          ["how", "do", "i", "load", "a", "lora", "adapter"]),
         ("max_model_len", ["max", "model", "len", "max_model_len"]),
-        ("vllm.entrypoints.openai",
-         ["vllm", "entrypoints", "openai", "vllm.entrypoints.openai"]),
+        ("vllm.entrypoints.openai", ["vllm", "entrypoints", "openai"]),
+        ("see lora.md", ["see", "lora", "md"]),
         ("--max-num-seqs=256", ["max", "num", "seqs", "256"]),
         ("fp8 and int4", ["fp8", "and", "int4"]),
         ("lora LoRA LORA", ["lora", "lora", "lora"]),
@@ -98,76 +100,76 @@ class TestTokenizer:
         assert Tokenizer().tokenize("café") == ["caf"]
 
     def test_pass_order(self) -> None:
-        """Plain terms, then dotted names, then snake_case names."""
+        """Plain terms, then snake_case names."""
         assert Tokenizer().tokenize("self.max_len") == [
-            "self", "max", "len", "self.max_len", "max_len"]
+            "self", "max", "len", "max_len"]
+
+    def test_dots_split(self) -> None:
+        """Dotted names are only split: no whole ``a.b`` term."""
+        tokens = Tokenizer().tokenize("llm.generate 0.10.1 lora.md")
+        assert all("." not in t for t in tokens)
 
     def test_pattern_compiled_once(self) -> None:
         """The patterns are shared, precompiled class attributes."""
         assert Tokenizer.PATTERN is Tokenizer().PATTERN
-        assert Tokenizer.DOT_PATTERN is Tokenizer().DOT_PATTERN
         assert Tokenizer.SNAKE_PATTERN is Tokenizer().SNAKE_PATTERN
 
 
-class TestDottedTerms:
-    """Second pass: dotted names are also kept whole."""
+class TestQueryStopwords:
+    """``tokenize_query``: the query terms without the stopwords."""
 
-    @pytest.mark.parametrize("text, dotted", [
-        ("call llm.generate() now", ["llm.generate"]),
-        ("vllm.entrypoints.openai.api_server",
-         ["vllm.entrypoints.openai.api_server"]),
-        ("self.max_model_len = 4", ["self.max_model_len"]),
-        ("torch.float16 or torch.bfloat16",
-         ["torch.float16", "torch.bfloat16"]),
-        ("Use LLM.Generate here", ["llm.generate"]),
-        ("see lora.md and api_server.py", ["lora.md", "api_server.py"]),
-        ("version 0.10.1", ["0.10.1"]),
-        ("a.b.c.d", ["a.b.c.d"]),
-    ])
-    def test_extra_terms(self, text: str, dotted: list[str]) -> None:
-        """The dotted names, lowercase, in order, right after the plain
-        terms (the snake_case names come after them).
+    def test_drops_stopwords(self) -> None:
+        """Question words and common words are removed."""
+        assert Tokenizer().tokenize_query(
+            "How do I load a LoRA adapter?") == ["load", "lora", "adapter"]
+
+    def test_keeps_order_and_repeats(self) -> None:
+        """The rest stays as ``tokenize`` gives it."""
+        assert Tokenizer().tokenize_query("the lora and the lora") == [
+            "lora", "lora"]
+
+    def test_snake_names_kept(self) -> None:
+        """A snake_case name made of stopwords is kept whole."""
+        tokens = Tokenizer().tokenize_query("What is is_driver_worker?")
+        assert tokens == ["driver", "worker", "is_driver_worker"]
+
+    @pytest.mark.parametrize("text", ["", "What is it?", "how does the"])
+    def test_only_stopwords(self, text: str) -> None:
+        """Nothing left when every word is a stopword."""
+        assert Tokenizer().tokenize_query(text) == []
+
+    def test_stopwords_are_lowercase_terms(self) -> None:
+        """Every stopword is a term ``tokenize`` can produce, or it would
+        never match.
         """
-        tokens = Tokenizer().tokenize(text)
-        plain = Tokenizer.PATTERN.findall(text.lower())
-        assert [t for t in tokens if "." in t] == dotted
-        assert tokens[len(plain):len(plain) + len(dotted)] == dotted
+        for word in Tokenizer.STOPWORDS:
+            assert Tokenizer().tokenize(word) == [word]
 
-    @pytest.mark.parametrize("text", [
-        "no dots here", "max_model_len", "end of sentence. Next one",
-        "trailing dot.", ".leading", "a .. b", "1. first item", "",
-    ])
-    def test_no_dotted_term(self, text: str) -> None:
-        """Without ``word.word`` nothing is added."""
-        assert all("." not in t for t in Tokenizer().tokenize(text))
+    def test_index_not_filtered(self) -> None:
+        """Only the query is filtered: the chunks keep their stopwords."""
+        index = BM25Index.build(make_chunks("how the server works"))
+        assert "how" in index._postings
+        assert "the" in index._postings
 
-    def test_plain_terms_unchanged(self) -> None:
-        """The first pass gives the same terms as before."""
-        tokens = Tokenizer().tokenize("use llm.generate(prompt)")
-        assert tokens[:4] == ["use", "llm", "generate", "prompt"]
+    def test_stopwords_only_query_finds_nothing(self) -> None:
+        """A query made only of stopwords scores no chunk."""
+        index = BM25Index.build(make_chunks("how the server works"))
+        assert index.search("How is the?", 5) == []
 
-    def test_parts_and_whole(self) -> None:
-        """Both the parts and the whole name are terms."""
-        tokens = Tokenizer().tokenize("vllm.entrypoints")
-        assert tokens == ["vllm", "entrypoints", "vllm.entrypoints"]
-
-    def test_repetitions_kept(self) -> None:
-        """A dotted name written twice counts twice (BM25 tf)."""
-        tokens = Tokenizer().tokenize("llm.generate then llm.generate")
-        assert tokens.count("llm.generate") == 2
-        assert tokens.count("llm") == 2
-
-    def test_never_duplicates_plain_terms(self) -> None:
-        """Second-pass terms always contain a dot, first-pass never."""
-        tokens = Tokenizer().tokenize("a.b c d.e f_g h.i_j")
-        plain = [t for t in tokens if "." not in t]
-        dotted = [t for t in tokens if "." in t]
-        assert not set(plain) & set(dotted)
-        assert dotted == ["a.b", "d.e", "h.i_j"]
+    def test_question_words_do_not_decide(self) -> None:
+        """A chunk that only shares the question wording does not beat
+        the one about the subject.
+        """
+        index = BM25Index.build(make_chunks(
+            "How and why: what is where, how and why.",
+            "Load a LoRA adapter with the server."))
+        hits = index.search("How do I load a LoRA adapter?", 2)
+        assert hits[0].chunk.text == "Load a LoRA adapter with the server."
+        assert len(hits) == 1
 
 
 class TestSnakeTerms:
-    """Third pass: snake_case names are also kept whole."""
+    """Second pass: snake_case names are also kept whole."""
 
     @pytest.mark.parametrize("text, snake", [
         ("max_model_len", ["max_model_len"]),
@@ -198,16 +200,13 @@ class TestSnakeTerms:
         tokens = Tokenizer().tokenize("max_len and max_len")
         assert tokens.count("max_len") == 2
 
-    def test_never_duplicates_other_passes(self) -> None:
-        """Snake terms have ``_`` and no dot: never a plain or dotted
-        term.
-        """
+    def test_never_duplicates_plain_terms(self) -> None:
+        """Snake terms always have ``_``, plain terms never."""
         tokens = Tokenizer().tokenize("a_b c.d_e f")
         plain = Tokenizer.PATTERN.findall("a_b c.d_e f")
-        dotted = Tokenizer.DOT_PATTERN.findall("a_b c.d_e f")
-        snake = tokens[len(plain) + len(dotted):]
+        snake = tokens[len(plain):]
         assert snake == ["a_b", "d_e"]
-        assert not set(snake) & (set(plain) | set(dotted))
+        assert not set(snake) & set(plain)
 
     def test_exact_name_ranks_first(self) -> None:
         """A question quoting ``max_model_len`` prefers the chunk that
@@ -220,38 +219,15 @@ class TestSnakeTerms:
         assert hits[0].chunk.text == "Set max_model_len to limit the context."
 
 
-class TestDottedSearch:
-    """The dotted terms change the ranking as intended."""
-
-    def test_exact_name_ranks_first(self) -> None:
-        """A question quoting ``llm.generate`` prefers the chunk that
-        writes it, over chunks with ``llm`` and ``generate`` apart.
-        """
-        index = BM25Index.build(make_chunks(
-            "The llm can generate text and the llm is fast.",
-            "Call llm.generate with your prompts.",
-            "Generate a report about the llm."))
-        hits = index.search("What does llm.generate return?", 3)
-        assert hits[0].chunk.text == "Call llm.generate with your prompts."
-
-    def test_parts_still_match(self) -> None:
-        """A question without dots still finds the dotted chunk."""
-        index = BM25Index.build(make_chunks(
-            "Call llm.generate with your prompts.", "Unrelated text."))
-        hits = index.search("how to generate", 2)
-        assert [h.chunk.text for h in hits] == [
-            "Call llm.generate with your prompts."]
-
-
 class TestBuild:
     """What ``build`` stores.
 
     Each chunk is indexed with the terms of its text plus those of its
-    file path. ``make_chunks`` paths (``data/raw/0.md``) add 5 terms:
-    ``data``, ``raw``, ``0``, ``md`` and ``0.md``.
+    file path. ``make_chunks`` paths (``data/raw/0.md``) add 4 terms:
+    ``data``, ``raw``, ``0`` and ``md``.
     """
 
-    PATH_TERMS = 5
+    PATH_TERMS = 4
 
     def test_postings(self) -> None:
         """term → {chunk position: occurrences}."""
@@ -276,7 +252,7 @@ class TestBuild:
                       text="class Foo")
         index = BM25Index.build([chunk])
         assert index._postings["keye"] == {0: 1}
-        assert index._postings["keye.py"] == {0: 1}
+        assert index._postings["py"] == {0: 1}
         assert index.search("keye", 1)[0].chunk == chunk
 
     def test_path_terms_not_in_text(self) -> None:
@@ -345,8 +321,8 @@ class TestTermScore:
 
     @pytest.fixture
     def index(self) -> BM25Index:
-        """Chunks of lengths 2, 4 and 12, plus 5 path terms each: 7, 9
-        and 17 (average 11).
+        """Chunks of lengths 2, 4 and 12, plus 4 path terms each: 6, 8
+        and 16 (average 10).
         """
         return BM25Index.build(make_chunks(
             "a b", "a b c d", " ".join(["w"] * 12)))
@@ -354,7 +330,7 @@ class TestTermScore:
     def test_matches_formula(self, index: BM25Index) -> None:
         """Same value as the written formula."""
         k1, b = BM25Index.K1, BM25Index.B
-        expected = 2.0 * 3 * (k1 + 1) / (3 + k1 * (1 - b + b * 9 / 11))
+        expected = 2.0 * 3 * (k1 + 1) / (3 + k1 * (1 - b + b * 8 / 10))
         assert index._term_score(2.0, 3, 1) == pytest.approx(expected)
 
     def test_grows_with_tf(self, index: BM25Index) -> None:

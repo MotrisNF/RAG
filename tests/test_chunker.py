@@ -1,9 +1,10 @@
 """Tests for ``src.chunker``."""
 import random
+import re
 
 import pytest
 
-from src.chunker import BaseChunker, FixedSizeChunker
+from src.chunker import BaseChunker, FixedSizeChunker, MdChunker, PyChunker
 from src.models import Chunk, Document, MinimalSource
 from src.reader import CorpusReader
 
@@ -264,3 +265,296 @@ class TestRealCorpus:
         assert max(c.last_character_index - c.first_character_index
                    for c in chunks) <= 2000
         assert len(chunks) > len(docs)
+
+
+FENCE = "```"
+
+
+class TestMdChunker:
+    """Markdown: prefer to cut right after a code block closes."""
+
+    def test_is_fixed_size_chunker(self) -> None:
+        """Same machinery as FixedSizeChunker, only other separators."""
+        assert issubclass(MdChunker, FixedSizeChunker)
+        assert MdChunker.SEPARATORS[0] == "\n" + FENCE + "\n"
+        assert MdChunker.CUT_BEFORE == frozenset()
+
+    def test_cuts_after_closing_fence(self) -> None:
+        """The chunk ends with the closing fence; the block stays whole."""
+        text = ("Intro text.\n" + FENCE + "bash\npip install vllm\n"
+                + FENCE + "\nAfter the block there is more text.")
+        chunks = MdChunker(55).chunk_document(make_doc(text))
+        assert chunks[0].text.endswith(FENCE + "\n")
+        assert FENCE + "bash\npip install vllm\n" + FENCE in chunks[0].text
+
+    def test_fence_beats_blank_line(self) -> None:
+        """A closing fence is preferred over a later blank line (both in
+        the second half of the window).
+        """
+        text = ("a" * 20 + "\n" + FENCE + "py\nx = 1\n" + FENCE + "\n"
+                + "b" * 5 + "\n\n" + "c" * 40)
+        chunks = MdChunker(50).chunk_document(make_doc(text))
+        assert chunks[0].text.endswith(FENCE + "\n")
+        assert "b" not in chunks[0].text
+
+    def test_opening_fence_with_language_not_a_cut(self) -> None:
+        """``\\n```bash`` is not a separator: no cut right after it."""
+        text = "intro\n" + FENCE + "bash\n" + "echo hi\n" * 10
+        for chunk in MdChunker(40).chunk_document(make_doc(text)):
+            assert not chunk.text.endswith(FENCE + "bash\n")
+
+    def test_headings_are_not_separators(self) -> None:
+        """Headings were measured worse: they are plain text here."""
+        assert not any(sep.lstrip("\n").startswith("#")
+                       for sep in MdChunker.SEPARATORS)
+
+    def test_falls_back_to_blank_line(self) -> None:
+        """Without code blocks it behaves like FixedSizeChunker."""
+        text = "word " * 30 + "\n\n" + "more " * 30
+        doc = make_doc(text)
+        assert (MdChunker(100).chunk_document(doc)
+                == FixedSizeChunker(100).chunk_document(doc))
+
+    @pytest.mark.parametrize("seed", range(20))
+    @pytest.mark.parametrize("size", [1, 7, 40, 300])
+    def test_invariants_random(self, seed: int, size: int) -> None:
+        """Exact offsets, no gaps, never above the max, on random text
+        full of fences, headings and blank lines.
+        """
+        rng = random.Random(seed)
+        pieces = ["word", " ", "\n", "\n\n", FENCE, FENCE + "bash",
+                  "# Title", "## Sub", "pip install x", "`code`"]
+        text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 120)))
+        doc = make_doc(text)
+        Invariants.check(doc, MdChunker(size).chunk_document(doc), size)
+
+
+@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="vLLM corpus not present")
+class TestMdChunkerRealCorpus:
+    """MdChunker on every Markdown file of the vLLM corpus."""
+
+    def test_invariants(self, docs: list[Document]) -> None:
+        """Every chunk satisfies the invariants, at 2000 and 500."""
+        for size in (2000, 500):
+            chunker = MdChunker(size)
+            for doc in docs:
+                if doc.file_path.endswith(".md"):
+                    Invariants.check(doc, chunker.chunk_document(doc), size)
+
+    def test_most_chunks_keep_code_blocks_closed(self,
+                                                 docs: list[Document]) -> None:
+        """Few chunks end inside an open code block (only blocks longer
+        than the chunk size have to be cut).
+        """
+        inside = total = 0
+        for doc in docs:
+            if not doc.file_path.endswith(".md"):
+                continue
+            for chunk in MdChunker(2000).chunk_document(doc):
+                total += 1
+                end = chunk.last_character_index
+                inside += doc.text[:end].count(FENCE) % 2
+        assert inside / total < 0.15
+
+
+DEFINITION = re.compile(r"( {4})?(@|class |def |async def )")
+
+
+class TestPyChunker:
+    """Python: prefer to cut right before a definition."""
+
+    def test_is_fixed_size_chunker(self) -> None:
+        """Same machinery as FixedSizeChunker, only other separators."""
+        assert issubclass(PyChunker, FixedSizeChunker)
+
+    def test_cut_before_are_separators(self) -> None:
+        """Every ``CUT_BEFORE`` entry is a separator, and they all rank
+        above the generic ones (which stay cut-after).
+        """
+        separators = PyChunker.SEPARATORS
+        assert PyChunker.CUT_BEFORE <= set(separators)
+        generic = separators.index("\n\n")
+        assert set(separators[:generic]) == PyChunker.CUT_BEFORE
+        assert not {"\n\n", "\n", " "} & PyChunker.CUT_BEFORE
+
+    def test_top_level_before_methods(self) -> None:
+        """Top-level definitions are tried before indented ones."""
+        separators = PyChunker.SEPARATORS
+        methods = [separators.index(s) for s in PyChunker.CUT_BEFORE
+                   if s.startswith("\n    ")]
+        top_level = [separators.index(s) for s in PyChunker.CUT_BEFORE
+                     if not s.startswith("\n    ")]
+        assert (len(top_level), len(methods)) == (4, 3)
+        assert max(top_level) < min(methods)
+
+    @pytest.mark.parametrize("definition", [
+        "def foo():\n", "async def foo():\n", "class Foo:\n",
+        "@decorator\ndef foo():\n",
+    ])
+    def test_cuts_before_top_level(self, definition: str) -> None:
+        """The definition starts the next chunk; the newline before it
+        stays at the end of the previous one.
+        """
+        text = "a" * 36 + "\n" + definition + "    return 1\n" + "b" * 50
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[0].text == "a" * 36 + "\n"
+        assert chunks[1].text.startswith(definition)
+
+    @pytest.mark.parametrize("definition", [
+        "    def run(self):\n", "    async def run(self):\n",
+        "    @property\n    def run(self):\n",
+    ])
+    def test_cuts_before_method(self, definition: str) -> None:
+        """Methods (four spaces) start the next chunk, indentation
+        included.
+        """
+        text = "class A:\n" + "a" * 36 + "\n" + definition + "b" * 50
+        chunks = PyChunker(80).chunk_document(make_doc(text, "a.py"))
+        assert chunks[1].text.startswith(definition)
+
+    def test_definition_beats_later_blank_line(self) -> None:
+        """A definition wins even if a blank line comes after it."""
+        text = "a" * 35 + "\nclass A:\n    x = 1\n\n" + "b" * 50
+        chunks = PyChunker(60).chunk_document(make_doc(text, "a.py"))
+        assert chunks[1].text.startswith("class A:")
+
+    def test_top_level_beats_later_method(self) -> None:
+        """A function is cut before, not inside at its nested def."""
+        text = ("a" * 36 + "\ndef top():\n    def inner():\n"
+                + "        pass\n" + "b" * 50)
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[1].text.startswith("def top():")
+
+    def test_decorator_stays_with_def(self) -> None:
+        """``\\n@`` ranks first: the cut goes before the decorator, not
+        between it and its ``def``.
+        """
+        text = "a" * 36 + "\n@decorator\ndef f():\n    pass\n" + "b" * 50
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[1].text.startswith("@decorator\ndef f():")
+
+    def test_decorator_in_first_half_kept(self) -> None:
+        """A decorator in the first half of the window is not a cut
+        candidate, but the cut chosen before its ``def`` moves back over
+        it.
+        """
+        text = ("a" * 30 + "\n@decorator(" + "x" * 10 + ")\ndef f():\n"
+                + "b" * 80)
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[0].text == "a" * 30 + "\n"
+        assert chunks[1].text.startswith("@decorator(" + "x" * 10
+                                         + ")\ndef f():")
+
+    def test_stacked_decorators_kept(self) -> None:
+        """All the decorators above a definition go with it, also when
+        the cut was chosen at the last one.
+        """
+        text = ("a" * 30 + "\n@first\n@second\n@third\ndef f():\n"
+                + "b" * 80)
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[1].text.startswith("@first\n@second\n@third\ndef f")
+
+    def test_method_decorator_kept(self) -> None:
+        """Indented decorators stay with their method too."""
+        text = ("class A:\n" + "a" * 25 + "\n    @staticmethod\n"
+                + "    def run():\n" + "b" * 80)
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[1].text.startswith("    @staticmethod\n    def run")
+
+    def test_decorated_class_kept(self) -> None:
+        """Decorated classes keep their decorator."""
+        text = ("a" * 30 + "\n@dataclass(frozen=True)\nclass A:\n"
+                + "b" * 80)
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[1].text.startswith("@dataclass(frozen=True)\nclass")
+
+    def test_decorators_from_chunk_start_not_moved(self) -> None:
+        """If the decorators reach back to the chunk start, the cut stays
+        before the ``def``: moving it would leave an empty chunk and the
+        chunking would never advance.
+        """
+        text = "@deco\n" * 8 + "def f():\n" + "b" * 80
+        doc = make_doc(text, "a.py")
+        chunks = PyChunker(70).chunk_document(doc)
+        Invariants.check(doc, chunks, 70)
+        assert chunks[0].text == "@deco\n" * 7
+        assert chunks[1].text.startswith("@deco\ndef f():")
+
+    def test_chunk_starting_mid_line(self) -> None:
+        """A chunk that starts in the middle of a decorator line (after
+        a hard cut) never moves the cut before its start.
+        """
+        text = "@" + "d" * 80 + "\n@deco\ndef f():\n" + "b" * 80
+        doc = make_doc(text, "a.py")
+        Invariants.check(doc, PyChunker(70).chunk_document(doc), 70)
+
+    def test_non_decorator_line_stops(self) -> None:
+        """Only ``@`` lines are pulled: a comment or code above them
+        stays in the previous chunk.
+        """
+        text = ("a" * 30 + "\nx = 1\n@deco\ndef f():\n" + "b" * 80)
+        chunks = PyChunker(70).chunk_document(make_doc(text, "a.py"))
+        assert chunks[0].text.endswith("x = 1\n")
+        assert chunks[1].text.startswith("@deco\ndef f():")
+
+    def test_without_definitions_like_fixed(self) -> None:
+        """Without definitions it behaves like FixedSizeChunker."""
+        text = "x = 1\n" * 20 + "\n\n" + "y = 2 " * 30
+        doc = make_doc(text, "a.py")
+        assert (PyChunker(50).chunk_document(doc)
+                == FixedSizeChunker(50).chunk_document(doc))
+
+    def test_early_definition_ignored(self) -> None:
+        """A definition in the first half is not a cut point: the cut
+        goes to a later separator instead of a tiny chunk.
+        """
+        text = "x\ndef f():\n    " + "a" * 30 + "\n" + "b" * 50
+        chunks = PyChunker(60).chunk_document(make_doc(text, "a.py"))
+        assert chunks[0].text.startswith("x\ndef f():")
+        assert len(chunks[0].text) > 30
+
+    @pytest.mark.parametrize("seed", range(20))
+    @pytest.mark.parametrize("size", [1, 7, 40, 300])
+    def test_invariants_random(self, seed: int, size: int) -> None:
+        """Exact offsets, no gaps, never above the max, on random code
+        full of definitions, decorators and blank lines.
+        """
+        rng = random.Random(seed)
+        pieces = ["x = 1", " ", "\n", "\n\n", "\ndef f():", "\nclass A:",
+                  "\n@deco", "\nasync def g():", "\n    def m(self):",
+                  "\n    @property", "\n    async def h(self):", "pass"]
+        text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 120)))
+        doc = make_doc(text, "a.py")
+        Invariants.check(doc, PyChunker(size).chunk_document(doc), size)
+
+
+@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="vLLM corpus not present")
+class TestPyChunkerRealCorpus:
+    """PyChunker on every Python file of the vLLM corpus."""
+
+    def test_invariants(self, docs: list[Document]) -> None:
+        """Every chunk satisfies the invariants, at 2000 and 500."""
+        for size in (2000, 500):
+            chunker = PyChunker(size)
+            for doc in docs:
+                if doc.file_path.endswith(".py"):
+                    Invariants.check(doc, chunker.chunk_document(doc), size)
+
+    def test_more_chunks_start_at_definition(self,
+                                             docs: list[Document]) -> None:
+        """More chunks start at a definition than with FixedSizeChunker
+        (measured: ~59 % against ~33 % at 2000).
+        """
+        def share(chunker: FixedSizeChunker) -> float:
+            starts = total = 0
+            for doc in docs:
+                if not doc.file_path.endswith(".py"):
+                    continue
+                for chunk in chunker.chunk_document(doc)[1:]:
+                    total += 1
+                    starts += bool(DEFINITION.match(chunk.text))
+            return starts / total
+
+        py, fixed = share(PyChunker(2000)), share(FixedSizeChunker(2000))
+        assert py > 0.5
+        assert py > fixed + 0.15

@@ -31,8 +31,8 @@ class BM25Index:
         FILE_NAME: Name of the index file inside the index folder.
     """
 
-    K1: float = 1.5
-    B: float = 0.75
+    K1: float = 1.9
+    B: float = 0.5
     FILE_NAME: str = "index.json"
 
     def __init__(self,
@@ -149,7 +149,7 @@ class BM25Index:
         Returns:
             Up to ``k`` hits, best first. Empty when no term matches.
         """
-        tokenized_query = set(self._tokenizer.tokenize(query))
+        tokenized_query = set(self._tokenizer.tokenize_query(query))
 
         scores: dict[int, float] = {}
         for term in tokenized_query:
@@ -224,4 +224,3 @@ class BM25Index:
             raise DatasetError(str(path), e) from e
 
         return cls(data.chunks, data.postings, data.lengths)
-

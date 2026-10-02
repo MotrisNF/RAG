@@ -54,7 +54,7 @@ test_rag:
 # search_dataset + evaluate run twice, for the docs and the code datasets.
 BASE_DATA     := data
 BASE_INDEX    := $(BASE_DATA)/processed
-BASE_OUTPUT   := $(BASE_DATA)/output/search_results
+BASE_OUTPUT   := $(BASE_DATA)/output/search_results/UnansweredQuestions
 BASE_DATASETS := dataset_docs_public.json dataset_code_public.json
 BASE_K        := 10
 BASE_CHUNK    := 2000

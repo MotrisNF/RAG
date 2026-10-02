@@ -349,7 +349,7 @@ The **mandatory** retrieval part is not complete yet: the subject requires two d
 3. Tests for `PyChunker` and `MarkdownChunker` (reuse the `FixedSizeChunker` invariants).
 4. Measure (docs, code, mini hard) and add the rows to README → Performance.
 
-### ⚠️ To study: decorator separated from its `def` (`PyChunker`)
+### ✅ Solved: decorator separated from its `def` (`PyChunker`)
 
 Seen with a small chunk (size 90):
 ```python
@@ -373,6 +373,15 @@ class A:
 4. Accept it: with 2000-character chunks it is rare and, as measured, chunk boundaries barely change recall. Document it in the README.
 
 Whatever is chosen: a test with `@property` / stacked decorators / a decorated class, and the chunker invariants must keep passing (no gaps, never above the max, always progresses).
+
+**Solution (2026-10-02): option 2.** `PyChunker._find_cut` calls the parent cut and, if it lands at the start of a line that begins (after the indentation) with `@`, `def `, `async def ` or `class `, walks back over the single-line `@` lines just above it. Rules:
+- it stops at the first line that is not a decorator (code and comments stay in the previous chunk);
+- if the decorators reach back to `start` (the whole chunk would be decorators), the cut is **not** moved, so the chunk never ends up empty and the chunking always advances;
+- the minimum fill can drop below half when moving back; decorator blocks are a few lines, so the chunk stays large.
+
+Not covered: decorators whose arguments span several lines (`@app.route(\n    "/x",\n)`), since their last line does not start with `@`.
+
+Measured on the real corpus (2000): chunks ending with a decorator line **406 → 1** of ~10,500; 12,881 → 12,907 chunks; recall unchanged (docs @5 0.86, code @5 0.717). Tests: the old `xfail` became `test_decorator_in_first_half_kept`, plus stacked decorators, method decorator, decorated class, non-decorator line stops, decorators from the chunk start, chunk starting mid-line.
 
 ---
 
