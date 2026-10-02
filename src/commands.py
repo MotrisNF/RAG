@@ -134,18 +134,21 @@ class RagCLI:
                 print(f"  {path}")
 
         chunkerpy = PyChunker(max_chunk_size)
-        chunkermd = MdChunker(max_chunk_size)
+        #chunkermd = MdChunker(max_chunk_size)
+        chunkertxt = FixedSizeChunker(max_chunk_size)
         chunkspy = chunkerpy.chunk_documents(
             [doc for doc in result.documents
              if doc.file_path.endswith(".py")]
             )
-        chunksmd = chunkermd.chunk_documents(
+        chunksmd = chunkertxt.chunk_documents(
             [doc for doc in result.documents
              if doc.file_path.endswith(".md")]
-            + [doc for doc in result.documents
+        )
+        chunkstxt = chunkertxt.chunk_documents(
+            [doc for doc in result.documents
                 if doc.file_path.endswith(".txt")]
         )
-        chunks = chunkspy + chunksmd
+        chunks = chunkspy + chunksmd + chunkstxt
 
         print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
         bm25 = BM25Index.build(chunks)
