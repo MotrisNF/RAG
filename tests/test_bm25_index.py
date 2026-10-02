@@ -84,10 +84,10 @@ class TestTokenizer:
         """Lowercase, split on anything that is not a letter or digit."""
         assert Tokenizer().tokenize(text) == tokens
 
-    def test_keeps_order_and_repeats(self) -> None:
+    def test_keeps_order_and_repeats(self) -> None737:
         """Order and repetitions are kept (counts matter for BM25)."""
         assert Tokenizer().tokenize("b a b") == ["b", "a", "b"]
-
+737
     def test_non_ascii_letters_split(self) -> None:
         """Only ``a-z``: accented letters act as separators."""
         assert Tokenizer().tokenize("café") == ["caf"]
