@@ -298,7 +298,6 @@ class TestPendingCommands:
     """
 
     @pytest.mark.parametrize("args", [
-        ("answer", "How to use LoRA?"),
         ("answer_dataset", "--student_search_results_path", DOCS_DATASET),
     ])
     def test_not_implemented(self, runner: Runner,

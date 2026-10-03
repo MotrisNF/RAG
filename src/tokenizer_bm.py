@@ -62,6 +62,18 @@ class Tokenizer:
                 + self.SNAKE_PATTERN.findall(low_text))
 
     def tokenize_query(self, text: str) -> list[str]:
+        """Return the terms of a query, without the ``STOPWORDS``.
+
+        Only for queries: the chunks are indexed with ``tokenize``, so
+        changing ``STOPWORDS`` does not require rebuilding the index.
+
+        Args:
+            text: The question to search for.
+
+        Returns:
+            The terms of ``tokenize`` in the same order, minus the
+            stopwords. Empty when the query has only stopwords.
+        """
         return [
                 term
                 for term in self.tokenize(text)

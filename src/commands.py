@@ -277,7 +277,8 @@ class RagCLI:
     def answer(
             self,
             query: Annotated[str, Field(min_length=1)],
-            k: Annotated[int, Field(gt=0)] = 10
+            k: Annotated[int, Field(gt=0)] = 10,
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
         """Answer a single question using the retrieved sources as context.
 
@@ -285,7 +286,14 @@ class RagCLI:
             query: The question to answer.
             k: Number of sources to retrieve as context.
         """
-        raise NotImplementedError("answer is not implemented yet")
+
+        from .generator import Generator
+
+        bm25 = BM25Index.load(Path(index_dir))
+        hits = bm25.search(query, k)
+        generator = Generator()
+        answer = generator.generate(query, [hit.chunk for hit in hits])
+        print(answer)
 
     @CliCommand.validated
     def answer_dataset(
@@ -305,6 +313,8 @@ class RagCLI:
             save_directory: Folder where the StudentSearchResultsAndAnswer
                 file is written, with the same file name as the input.
         """
+
+        from .generator import Generator
         raise NotImplementedError("answer_dataset is not implemented yet")
 
     @CliCommand.validated

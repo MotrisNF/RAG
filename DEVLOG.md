@@ -4,6 +4,12 @@ A step-by-step record of what I did and **why**, so I can understand my own work
 
 > How to use: add a new entry at the end of the log every time I finish something (ideally one entry per commit). Keep it short: what, why, and what I learned. A template is at the bottom.
 
+> **Personal reminders** (moved from the old README):
+> - Download the moulinette. It's only at home.
+> - Download the raw data. It's only at home.
+>
+> Please, don't be like always :)
+
 ---
 
 ## Step 0 — Understanding the project (2026-09-28)
@@ -341,13 +347,64 @@ A step-by-step record of what I did and **why**, so I can understand my own work
 
 ---
 
-## 📍 WHERE I STOPPED (2026-10-02)
+## Step 18 — Two chunking strategies, tokenizer and query tuning (2026-10-02 / 10-03) · commits `18ed1fc`, `c9e1b4d`, `5233008` (+ uncommitted)
 
-The **mandatory** retrieval part is not complete yet: the subject requires two distinct chunking strategies.
-1. `MarkdownChunker` for `.md` and `.txt`: another subclass with heading separators (`\n# `, `\n## `, `\n### `...) in `CUT_BEFORE`.
-2. Choose the chunker by extension in `index` (`.py` → `PyChunker`, the rest → Markdown).
-3. Tests for `PyChunker` and `MarkdownChunker` (reuse the `FixedSizeChunker` invariants).
-4. Measure (docs, code, mini hard) and add the rows to README → Performance.
+**What**
+- Tokenizer: snake_case pass (`max_model_len` kept whole). The dotted pass was **removed**: it barely helped (~1 code question) and added terms to index.
+- File path tokens enabled in `BM25Index.build`; `K1 = 1.9`, `B = 0.5`.
+- `MdChunker(FixedSizeChunker)` for `.md` **and `.txt`** (the subject's "Markdown / text" strategy): first separator `\n```\n`, so a code block stays whole in the chunk it closes. Heading separators were measured and dropped (−4 docs points). `index` now uses exactly two strategies: `PyChunker` for `.py`, `MdChunker` for the rest.
+- `PyChunker._find_cut`: decorators kept with their definition (see "Solved" below).
+- `Tokenizer.STOPWORDS` + `tokenize_query`: question words and common words are dropped from the **query only**; `search` uses it.
+- Tests: `TestPyChunker` (+ real corpus), `TestMdChunker`, `TestQueryStopwords`; dotted tests removed (1031 passing).
+- Makefile: `test_rag_base` saved to `data/output/search_results` instead of `.../UnansweredQuestions` (the folder was never created) — fixed.
+
+**Results** (moulinette, chunk 2000, k = 10, recall@5; full tables in README → Performance)
+- Baseline 2026-10-01: docs 0.85, code 0.596.
+- Now: **docs 0.87, code 0.758**. Index ~2 s, each public dataset searched in < 1 s.
+- Overlap between chunks (experiment, not implemented): hurts docs (neighbour chunks take two of the five slots); on `.py` only +1–4 code questions, not growing with the overlap → noise.
+
+**Learned**
+- idf is not enough against question words in a code corpus: `why`/`how`/`what` are rare there, so they weigh more than `lora`.
+- Stop tuning when the gains are the size of the noise (1 question ≈ 1 %).
+
+---
+
+## Step 19 — Generation: `Generator` and first prompt experiments (2026-10-03) · in progress
+
+**What**
+- `torch` CPU-only (own uv index in `pyproject.toml`) + `transformers`.
+- `Generator`: loads Qwen3-0.6B once (`float32`), `_build_context` (chunks with a header and their path until `MAX_CONTEXT_TOKENS`, counted with Qwen's tokenizer), `_build_messages` (system + user, question last, reminder after it), `generate` (chat template without thinking, greedy, only the new tokens decoded).
+- `answer` prints the raw answer (JSON output and the no-hits case pending).
+
+**Timings (CPU, 8 threads)**
+- Model load ~5.6 s. Prompt of ~2000 tokens: prefill **29 s in bfloat16** (the default: Qwen is stored in bf16 and this CPU has no native bf16) vs **10 s in float32**; ~150 ms per generated token. → `dtype=torch.float32`.
+- No time limit on generation in the subject (the 90 s are for retrieval), but `answer_dataset` on 100 questions will take ~20–40 min.
+
+**Prompt experiment: "What CUDA architectures are supported for Marlin MOE kernels in vLLM?"** (expected `8.0;8.7;9.0+PTX`, in `CMakeLists.txt`; retrieval OK: the right chunk is 2nd)
+
+| Variant | Answer |
+|---|---|
+| 6 chunks, 4-rule prompt | ❌ "…are specified in the context…" |
+| Oracle: only the right chunk | ✅ |
+| Reversed order (best chunk last) | ❌ |
+| 3 chunks, 4-rule prompt | ❌ invents `MARLIN_ARCHS` |
+| 6 or 3 chunks, short prompt "Quote the exact names and values" | ✅ `8.0;8.7;9.0+PTX` |
+
+Same battery, old vs new prompt: bitsandbytes min version ✅/✅; `--turbo-mode` (does not exist) refuses ✅/✅; LoRA loading ✅/✅ (new one more direct); Mixtral quantization methods ❌/❌ (new one copies an exact list, but from the wrong chunk); "capital of France" ❌/❌ (answers "Paris" from its own knowledge). → Short prompt adopted.
+
+**Learned**
+- The oracle test (only the right chunk) separates retrieval failures from generation failures.
+- With a 0.6B model, fewer and positive instructions work better than a list of rules. Some failures (own knowledge, picking the wrong list) are model limits.
+
+**Off-topic rule (added to `REMINDER`, not measured yet)**
+- Idea: "If the question is not about vLLM, LLMs, model serving or programming, say: <the fixed refusal>". Judging the topic of the question is easier for a small model than checking whether the context contains the answer, so it may fix "Paris".
+- Risks to check: valid questions that do not name vLLM ("How do I load a LoRA adapter?") refused; a longer reminder weakens "exact values" (Marlin). Re-run the whole battery, not only "Paris".
+- Plan B (no prompt): skip the model when the best BM25 score is very low (the threshold is hard to choose).
+- **Measured (2026-10-03):** "Paris" is now refused ✅, `--turbo-mode` refused ✅, bitsandbytes ✅, but **Marlin and LoRA (valid, correct before) are refused ❌**. The risk happened. To decide: shorter wording, drop the rule, or plan B.
+
+## 📍 WHERE I STOPPED (2026-10-03)
+
+The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
 
 ### ✅ Solved: decorator separated from its `def` (`PyChunker`)
 
@@ -400,10 +457,10 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [x] Index convention: `last_character_index` is **exclusive**.
 - [x] `Chunk(MinimalSource)` model, `CorpusReader`, `BaseChunker`, `FixedSizeChunker` + tests.
 - [x] `PyChunker` (cut before definitions); single `_find_cut` with `CUT_BEFORE`.
-- [ ] `MarkdownChunker` (cut before headings) for `.md` / `.txt`.
-- [ ] Choose the chunker by extension in `index`.
-- [ ] Tests for `PyChunker` and `MarkdownChunker`.
-- [ ] Decorator separated from its `def` (see "To study" above).
+- [x] `MdChunker` for `.md` / `.txt` (cut after code blocks; headings measured worse).
+- [x] Choose the chunker by extension in `index`.
+- [x] Tests for `PyChunker` and `MdChunker`.
+- [x] Decorator separated from its `def` (see "Solved" above).
 - [ ] Maybe: `index --chunking fixed|structural` (default structural) to compare strategies.
 
 **Index, search and evaluation**
@@ -413,19 +470,41 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [x] Mini corpus + datasets in `tests/data`, `make test_rag`.
 
 **Improve recall** (goal: docs ≥ 80 %, code ≥ 50 % recall@5 — met; more margin wanted for code)
-- [x] Tokenizer: dotted names kept whole (`llm.generate`). **Measure it.**
-- [ ] Tokenizer: keep whole `snake_case` identifiers too. Today `max_model_len` → `max`, `model`, `len` only (the whole name is kept only inside a dotted name). Idea: a third pass `[a-z0-9]+(?:_[a-z0-9]+)+`.
-- [ ] File path in the indexed text: code ready but commented in `BM25Index.build`. Uncomment, rebuild, measure.
+- [x] Tokenizer: dotted names kept whole — measured, **removed** (no gain, more terms).
+- [x] Tokenizer: keep whole `snake_case` identifiers too (second pass).
+- [x] File path in the indexed text (enabled, measured).
 - [ ] Section headings / function names in the indexed text (after the structural chunkers).
 - [ ] Save which tokenizer built the index (in `IndexData`) and check it on `load`: a mismatch gives wrong results with no error.
 - [ ] Try excluding `tests/`, `benchmarks/` (dataset code sources are all under `vllm/`).
-- [ ] Try chunk sizes, overlap, `K1`/`B`; record every result in README → Performance.
+- [x] Try chunk sizes, overlap, `K1`/`B`; record every result in README → Performance.
+- [x] Query stopwords (`tokenize_query`).
 
 **Generation (mandatory)**
-- [ ] Install `torch` CPU-only with uv (configured in `pyproject.toml`, so `uv sync` reproduces it) + `transformers`.
+- [x] Install `torch` CPU-only with uv (configured in `pyproject.toml`, so `uv sync` reproduces it) + `transformers`.
 - [ ] Model cache on `goinfre` / `sgoinfre` (check which one on campus) via `HF_HOME`.
-- [ ] `Generator` class in its own module, imported **only** inside `answer` / `answer_dataset` (the other commands must not load torch). Chat template without thinking, token budget, max new tokens, clean output.
-- [ ] `answer` (reuses `_search_question`) and `answer_dataset` (reads results with `_open_file_save`).
+- [x] `Generator` class in its own module, imported **only** inside `answer` / `answer_dataset` (the other commands must not load torch). Chat template without thinking, token budget, max new tokens, clean output.
+- [ ] `answer`: JSON output (`MinimalAnswer` in `StudentSearchResultsAndAnswer`), no-hits case, `index_dir` in the docstring.
+- [ ] `answer_dataset` (reads results with `_open_file_save`, re-reads the source texts, one `Generator`, tqdm). Maybe save every N questions, so a crash does not lose everything.
+- [ ] Off-topic rule in `REMINDER`: refuses valid questions (Marlin, LoRA). Decide: shorter wording, drop it, or skip the model when the best BM25 score is very low.
+
+**Memory-safe model loading** (with too little RAM the kernel kills the process: `Killed`, exit 137, no Python exception, nothing to catch)
+- [ ] Measured peaks (`/usr/bin/time -f %M`): `answer` in **float32 ~5.1 GB**, in **bfloat16 ~3.0 GB** (both include the index and the bf16 → fp32 conversion while loading); `search` alone ~0.45 GB.
+- [ ] Read the available memory **before** loading the model. Nothing to install or import from a library and no sudo: `/proc/meminfo` is a plain text file readable by every user (`-r--r--r-- root`), read with `pathlib`, already imported in the project:
+  ```python
+  from pathlib import Path
+
+  def available_gb() -> float:
+      for line in Path("/proc/meminfo").read_text().splitlines():
+          if line.startswith("MemAvailable:"):        # "MemAvailable:   9810268 kB"
+              return int(line.split()[1]) / 1024 ** 2  # kB → GB
+      raise ...                                        # line missing
+  ```
+  (OOP: as a method of a class, e.g. a static method of `Generator` or a small `MemoryCheck` class.)
+- [ ] Choose the dtype automatically: float32 if `available ≥ 5.5 GB`, else bfloat16 if `available ≥ 3.4 GB`, else a clean `RagError` (message + exit 1, no attempt to load). Thresholds = measured peak + ~0.4 GB margin (other programs can take memory while loading), as class constants (`FLOAT32_MIN_GB`, `BFLOAT16_MIN_GB`) with that explanation. Measured with `MAX_CONTEXT_TOKENS = 2500`: re-measure if the budget grows a lot. `answer_dataset` does not load the index (~0.45 GB less), so the same thresholds are conservative there.
+- [ ] `/proc/meminfo` only exists on Linux: catch `FileNotFoundError` / `OSError` and fall back to the conservative choice (bfloat16).
+- [ ] Flag on `answer` (and `answer_dataset`) to force the dtype, **for testing only**. If the forced dtype does not fit, do not refuse, but print a warning to stderr (`float32 needs ~5 GB, only 2.1 GB available`).
+- [ ] Tests: the choice logic with fake values (no model loaded), the missing-file fallback, the error when nothing fits.
+- [ ] README: Requirements (automatic choice, thresholds) and Design decisions.
 
 **Bonus** (only once the mandatory part is perfect)
 - [ ] Semantic embeddings (`all-MiniLM-L6-v2`), hybrid retrieval (reciprocal rank fusion), incremental indexing, caching, local HTTP API.

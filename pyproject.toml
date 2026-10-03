@@ -10,7 +10,9 @@ requires-python = ">=3.10"
 dependencies = [
     "fire>=0.7.1",
     "pydantic>=2.13.5",
+    "torch>=2.14.1",
     "tqdm>=4.70.1",
+    "transformers>=5.18.0",
 ]
 
 # Development-only dependencies (installed by `uv sync`).
@@ -41,3 +43,13 @@ exclude = ['^\.venv/', '^data/', '^tests/data/', '^build/', '^dist/']
 testpaths = ["tests"]
 # Project root on sys.path so tests can `import src`.
 pythonpath = ["."]
+
+#For dowload the CPU dependences only
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
