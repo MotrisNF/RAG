@@ -25,7 +25,7 @@ Everything is exposed through a command-line interface (Python Fire): `index`, `
 
 - Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/).
 - CPU only: PyTorch is installed from the CPU wheel index (configured in `pyproject.toml`), so no CUDA libraries are downloaded.
-- ~5 GB of free RAM for answer generation (peak while loading the model in `float32`; `search` alone needs ~0.5 GB). With less memory the system swaps heavily or kills the process (`Killed`, exit code 137).
+- Free RAM for answer generation: **≥ 5.5 GB** to run the model in `float32` (fastest), **≥ 3.4 GB** for `bfloat16` (~2× slower). The type is chosen automatically from the available memory; with less than 3.4 GB, `answer` stops with a clear error before loading anything. `search` alone needs ~0.5 GB.
 
 ### Installation
 
@@ -400,6 +400,27 @@ It makes chunks cleaner, which gives better context for the generator, not easie
 
 Reading the prompt grows with its length: 1,273 tokens take 6 s in float32. The subject sets no time limit for generation (the 90 s are for retrieval).
 
+**Memory-safe loading.** float32 is faster but needs more memory, and when Linux runs out of memory it kills the process with `SIGKILL` (`Killed`, exit code 137): no Python exception, nothing the program can catch. So `Generator` reads `MemAvailable` from `/proc/meminfo` **before** loading the model and chooses the type:
+
+| Available memory | Type | Reason |
+|---|---|---|
+| ≥ 5.5 GB | float32 | measured peak 5.1 GB + margin |
+| ≥ 3.4 GB | bfloat16 | measured peak 3.0 GB + margin |
+| < 3.4 GB | none: `RagError`, exit 1 | the model would not fit |
+| unknown (no `/proc/meminfo`, not Linux) | bfloat16 | the conservative choice |
+
+The margin covers other programs taking memory while the model loads. Checked end to end with the real CLI (memory reading replaced to simulate each case):
+
+| Case | Result | Exit | Peak RAM | Time |
+|---|---|---|---|---|
+| This PC (9.4 GB available) | float32, correct answer | 0 | 5.0 GB | 19 s |
+| No `/proc/meminfo` | bfloat16, same answer | 0 | 2.6 GB | 42 s |
+| 2 GB available | `Not enough memory to load Qwen/Qwen3-0.6B: 2.0 GB available, at least 3.4 GB needed` | 1 | 0.75 GB | 2.6 s |
+
+The model is never loaded when it cannot fit, and no case ends with a traceback.
+
+`--dtype float32` or `--dtype bfloat16` skips the automatic choice (for testing). If the forced type needs more memory than is available, a `WARNING` is printed to stderr, but the model is still loaded: forcing it is the user's decision.
+
 **Prompt.** The question *"What CUDA architectures are supported for Marlin MOE kernels in vLLM?"* (expected `8.0;8.7;9.0+PTX`, in `CMakeLists.txt`) was answered with *"…are specified in the context…"*, although retrieval was right: the correct chunk ranked 2nd.
 
 | Variant | Result |
@@ -432,9 +453,69 @@ The oracle test separates retrieval failures from generation failures. With the 
 
 The rule fixes out-of-domain questions, but makes the model refuse valid ones: a longer reminder dilutes "quote the exact values", and questions that do not name vLLM ("How do I load a LoRA adapter?") look off-topic. A refused valid question is worse than a wrong answer to an out-of-domain one, so this trade-off is still open (next options: a shorter wording, or skipping the model when the best BM25 score is very low). The other remaining failures (choosing the wrong list among similar chunks) are the "known reasoning limits" of a 0.6B model mentioned in the subject.
 
+### Robustness and performance: how to test it yourself
+
+The memory check reads `/proc/meminfo`. To see each branch work **through the real CLI**, without changing the code and without `sudo`, either use real memory or show the command a different `/proc/meminfo`:
+
+```bash
+Q="What is the minimum version of bitsandbytes required for vLLM quantization?"
+
+# 1. Real memory pressure: hold most of the free memory in another process
+avail=$(awk '/MemAvailable/{print int($2/1024/1024)}' /proc/meminfo)
+python3 -c "import time; x = b'x' * (($avail - 5) * 1024**3); time.sleep(120)" &
+sleep 5; uv run -m src answer "$Q"          # → bfloat16 (~5 GB left)
+kill %1
+
+# 2. Fake values: a private mount namespace (unshare -rm, no sudo) where only
+#    this command sees another /proc/meminfo
+printf 'MemAvailable: 2097152 kB\n' > /tmp/meminfo_2gb      # 2 GB
+printf 'MemAvailable: 4194304 kB\n' > /tmp/meminfo_4gb      # 4 GB
+unshare -rm sh -c "mount --bind /tmp/meminfo_2gb /proc/meminfo && uv run -m src answer '$Q'"
+unshare -rm sh -c "mount --bind /tmp/meminfo_4gb /proc/meminfo && uv run -m src answer '$Q'"
+
+# 3. Unreadable memory: /proc/meminfo replaced by an empty file
+unshare -rm sh -c "mount --bind /dev/null /proc/meminfo && uv run -m src answer '$Q'"
+
+# 4. Forced type with too little memory: warning, then it loads anyway
+unshare -rm sh -c "mount --bind /tmp/meminfo_2gb /proc/meminfo && uv run -m src answer '$Q' --dtype float32"
+```
+
+Results on this PC (16 GB, 12 GB available):
+
+| Test | Model type | Output | Exit | Time | Peak RAM |
+|---|---|---|---|---|---|
+| No pressure | float32 | 0.46.1 ✅ | 0 | 19 s | 5.0 GB |
+| 1. 7 GB held by another process (5.1 GB left) | bfloat16 | 0.46.1 ✅ | 0 | 43 s | |
+| 2. Fake 4 GB | bfloat16 | 0.46.1 ✅ | 0 | 45 s | 2.6 GB |
+| 2. Fake 2 GB | not loaded | `Not enough memory to load Qwen/Qwen3-0.6B: 2.00 GB available, at least 3.4 GB needed` | 1 | 2.7 s | 0.75 GB |
+| 3. Empty `/proc/meminfo` | bfloat16 | `The available memory cannot be read. Torch mode: bfloat16`, then 0.46.1 ✅ | 0 | 44 s | 2.5 GB |
+| 4. `--dtype float32`, fake 2 GB | float32 | `WARNING: '--dtype float32' needs at least 5.5 GB of available memory, but only 2.00 GB is available.`, then 0.46.1 ✅ | 0 | | |
+
+`unshare -rm` needs unprivileged user namespaces. Ubuntu 24.04 blocks them by default (`kernel.apparmor_restrict_unprivileged_userns = 1`), and a normal terminal fails with `unshare: write error /proc/self/uid_map: Operation not permitted`. They work from VS Code's integrated terminal when VS Code is the snap package (its AppArmor profile is in complain mode), or after `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` (restore it with `=1` afterwards; it also goes back to 1 on reboot). Test 1 needs neither.
+
+**Known limitation.** `/proc/meminfo` shows the memory of the whole machine. Inside a container or a cgroup with its own limit (`docker --memory`, `systemd-run -p MemoryMax=`), the check sees the host's memory, can choose float32 and the process can still be killed. Reading the cgroup limit (`/sys/fs/cgroup/memory.max`) would fix it; not needed on the 42 computers.
+
+### Robustness and performance improvements
+
+What was tried to make the system faster and harder to break, with its measured effect:
+
+| Attempt | Problem | Result | Kept |
+|---|---|---|---|
+| Own BM25 with a JSON index (pydantic) | Indexing and search time | Index ~2 s (limit 5 min), 100 questions < 1 s (limit 90 s for 200) | ✅ |
+| Dotted-name tokenizer pass | Recall of quoted module names | No gain, more terms to index | ❌ removed |
+| Chunk overlap | Answers split between chunks | Hurts docs, gains on code are noise | ❌ |
+| Lazy import of `Generator` | PyTorch takes seconds to load | `index`, `search`, `evaluate`, `--help` never load it | ✅ |
+| Load the model once | `answer_dataset` with many questions | One load (~5.6 s) per command, not per question | ✅ |
+| `float32` instead of the default `bfloat16` | bfloat16 is emulated on this CPU | Prompt read 29 s → 10 s; answer ~40 s → ~19 s | ✅ when it fits |
+| Memory check before loading | Out of memory → `Killed`, nothing to catch | float32, bfloat16 or a clean error, from the available memory | ✅ |
+| `--dtype` with a closed list (`Literal`) | Any text was accepted | `float16` → clean argument error, values shown in `--help` | ✅ |
+| Shorter prompt asking for exact values | Evasive answers with the right context | Fixed the Marlin question, no regression | ✅ |
+| Off-topic rule in the reminder | "Paris" answered from the model's own knowledge | Refuses out-of-domain questions, but also some valid ones | ⚠️ open |
+| Bugs found by running the tests above | — | `"MemAvaiable"` typo (never read the memory) and `dtype` passed positionally (`TypeError`: the model never loaded) | ✅ fixed |
+
 ### Tests
 
-`make test` runs **1,030 tests** in ~30 s:
+`make test` runs **1,030 tests** in ~30 s (the memory-safe loading is tested end to end as described above, not yet in the suite):
 
 - **Chunkers:**
   - invariants (exact offsets, no gaps or overlaps, never above the maximum, always progresses) on random texts and on the whole real corpus;
@@ -459,7 +540,7 @@ The rule fixes out-of-domain questions, but makes the model refuse valid ones: a
 - **Stopwords on the query only.** The index keeps every term, so the list can change without rebuilding it.
 - **Lazy import of the generator.** `answer` and `answer_dataset` import `Generator` inside the command, so `index`, `search`, `evaluate` and `--help` never pay the seconds PyTorch takes to load.
 - **Load the model once.** `Generator.__init__` loads Qwen; each question only calls `generate`.
-- **float32 on CPU**: 3× faster to read the prompt than the default bfloat16, at the cost of more RAM (peak ~5.1 GB against ~3.0 GB).
+- **float32 on CPU when it fits**: 3× faster to read the prompt than the default bfloat16, at the cost of more RAM (peak ~5.1 GB against ~3.0 GB). The type is chosen from the available memory before loading, so a smaller machine gets a slower answer instead of a killed process.
 - **Prompt for a small model:**
   - a short system message with positive instructions;
   - the question after the context, where a small model attends most;
@@ -482,6 +563,7 @@ The rule fixes out-of-domain questions, but makes the model refuse valid ones: a
 - **Decorators separated from their function.** The minimum-fill rule rejects a decorator in the first half of the window, so the cut fell between `@decorator` and `def`. Solved by moving the cut back over the decorator lines, without ever going before the start of the chunk. That guarantees the chunking always advances.
 - **Non-deterministic rankings.** Equal scores came out in a different order between runs, because of `set` iteration order. Solved by ranking on `(score, chunk id)`.
 - **Slow generation.** 30–40 s per answer, until profiling showed that bfloat16 is emulated on this CPU. Switched to float32.
+- **Running out of memory cannot be caught.** The kernel kills the process without a Python exception. Solved by checking the available memory first: float32, bfloat16 or a clean error, depending on what fits.
 - **Evasive answers with a correct context.** Diagnosed with the oracle test (only the correct chunk) and solved with a shorter prompt that asks for the exact values.
 - **Refusing out-of-domain questions without refusing valid ones.** The 0.6B model answers "Paris" from its own knowledge despite the rules. An explicit off-topic rule fixes it, but also makes it refuse some valid questions: still being tuned.
 

@@ -5,10 +5,11 @@ Every public method of ``RagCLI`` is a command:
 """
 import functools
 import inspect
+from types import SimpleNamespace
 from collections import Counter
 from pathlib import Path, PurePosixPath
-from typing import (Annotated, Any, Callable, TypeVar, cast, get_args,
-                    get_origin)
+from typing import (Annotated, Any, Callable, Literal, TypeVar, cast,
+                    get_args, get_origin)
 
 from pydantic import (BaseModel, ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
@@ -17,10 +18,11 @@ from tqdm import tqdm
 from .bm25_index import BM25Index
 from .chunker import MdChunker, PyChunker
 from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
-                         PathError, ResultsEvaluationError)
+                         PathError, RagError, ResultsEvaluationError)
 from .evaluator import Evaluator
-from .models import (MinimalSearchResults, MinimalSource, StudentSearchResults,
-                     RagDataset, UnansweredQuestion, EvaluationInform)
+from .models import (DtypeMode, MinimalSearchResults, MinimalSource,
+                     StudentSearchResults, RagDataset, UnansweredQuestion,
+                     EvaluationInform)
 from .reader import CorpusReader
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -73,13 +75,36 @@ class CliCommand:
                 raise ArgError(e, names) from e
 
         params = [
-            param.replace(annotation=get_args(param.annotation)[0])
-            if get_origin(param.annotation) is Annotated else param
+            param.replace(
+                annotation=CliCommand._help_type(param.annotation))
             for param in signature.parameters.values()
         ]
         setattr(command, "__signature__",
                 signature.replace(parameters=params))
         return cast(F, command)
+
+    @staticmethod
+    def _help_type(annotation: Any) -> Any:
+        """The type Fire shows in ``--help`` for one parameter.
+
+        Fire prints ``annotation.__qualname__``: ``Annotated`` is unwrapped
+        to its real type, and a ``Literal`` (whose name is only
+        ``Literal``) becomes an object named after its values
+        (``auto | float32 | bfloat16``).
+
+        Args:
+            annotation: The parameter's annotation in the method.
+
+        Returns:
+            The annotation to show; only the help uses it, pydantic keeps
+            validating with the original one.
+        """
+        if get_origin(annotation) is Annotated:
+            annotation = get_args(annotation)[0]
+        if get_origin(annotation) is Literal:
+            values = " | ".join(str(v) for v in get_args(annotation))
+            return SimpleNamespace(__qualname__=values)
+        return annotation
 
 
 class RagCLI:
@@ -278,20 +303,30 @@ class RagCLI:
             self,
             query: Annotated[str, Field(min_length=1)],
             k: Annotated[int, Field(gt=0)] = 10,
-            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
+            dtype: DtypeMode = "auto"
             ) -> None:
         """Answer a single question using the retrieved sources as context.
 
         Args:
             query: The question to answer.
             k: Number of sources to retrieve as context.
+            index_dir: Folder where the index command saved the index.
+            dtype: How to load the model. ``auto`` chooses float32 or
+                bfloat16 from the available memory; ``float32`` or
+                ``bfloat16`` force it, without the memory check (for
+                testing).
         """
 
-        from .generator import Generator
-
+        try:
+            from .generator import Generator
+        except (ImportError, MemoryError, OSError) as e:
+            raise RagError(f"Cannot load PyTorch ({type(e).__name__}: {e}). "
+                           "Not enough memory, or the installation is broken: "
+                           "run 'uv sync'.") from e
         bm25 = BM25Index.load(Path(index_dir))
         hits = bm25.search(query, k)
-        generator = Generator()
+        generator = Generator(dtype)
         answer = generator.generate(query, [hit.chunk for hit in hits])
         print(answer)
 
@@ -303,7 +338,8 @@ class RagCLI:
                 str,
                 Field(min_length=1)
                 ] = ("data/output/search_results_and_answer/"
-                     "UnansweredQuestions")
+                     "UnansweredQuestions"),
+            dtype: DtypeMode = "auto"
             ) -> None:
         """Generate answers for the output of search_dataset.
 
@@ -312,6 +348,7 @@ class RagCLI:
                 (StudentSearchResults).
             save_directory: Folder where the StudentSearchResultsAndAnswer
                 file is written, with the same file name as the input.
+            dtype: How to load the model, as in ``answer``.
         """
 
         from .generator import Generator

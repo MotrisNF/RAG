@@ -1,5 +1,11 @@
 ARGS ?=
 
+# bash for the `time` keyword used by the rules that run the real program
+# (test_rag, test_rag_base, test_answer): it prints how long each command
+# took, in the format below.
+SHELL := /bin/bash
+export TIMEFORMAT := Time: %1Rs
+
 all: install
 
 install:
@@ -39,12 +45,12 @@ TEST_K       ?= 5
 TEST_CHUNK   ?= 500
 
 test_rag:
-	uv run -m src index --raw_dir $(TEST_DATA)/raw --index_dir $(TEST_INDEX) \
+	time uv run -m src index --raw_dir $(TEST_DATA)/raw --index_dir $(TEST_INDEX) \
 		--max_chunk_size $(TEST_CHUNK)
-	uv run -m src search_dataset \
+	time uv run -m src search_dataset \
 		--dataset_path $(TEST_DATA)/datasets/UnansweredQuestions/$(TEST_DATASET) \
 		--k $(TEST_K) --save_directory $(TEST_OUTPUT) --index_dir $(TEST_INDEX)
-	uv run -m src evaluate \
+	time uv run -m src evaluate \
 		--student_search_results_path $(TEST_OUTPUT)/$(TEST_DATASET) \
 		--dataset_path $(TEST_DATA)/datasets/AnsweredQuestions/$(TEST_DATASET) \
 		--k $(TEST_K)
@@ -60,19 +66,118 @@ BASE_K        := 10
 BASE_CHUNK    := 2000
 
 test_rag_base:
-	uv run -m src index --raw_dir $(BASE_DATA)/raw --index_dir $(BASE_INDEX) \
+	time uv run -m src index --raw_dir $(BASE_DATA)/raw --index_dir $(BASE_INDEX) \
 		--max_chunk_size $(BASE_CHUNK)
 	@for dataset in $(BASE_DATASETS); do \
 		echo "===== $$dataset ====="; \
-		uv run -m src search_dataset \
+		time uv run -m src search_dataset \
 			--dataset_path $(BASE_DATA)/datasets/UnansweredQuestions/$$dataset \
 			--k $(BASE_K) --save_directory $(BASE_OUTPUT) \
 			--index_dir $(BASE_INDEX) || exit 1; \
-		uv run -m src evaluate \
+		time uv run -m src evaluate \
 			--student_search_results_path $(BASE_OUTPUT)/$$dataset \
 			--dataset_path $(BASE_DATA)/datasets/AnsweredQuestions/$$dataset \
 			--k $(BASE_K) || exit 1; \
 	done
+
+# Subject time limits (chapter VII), checked on the real data with the
+# moulinette settings. Each rule prints the time and PASS or FAIL.
+#   test_index:     indexing the whole corpus in at most 5 minutes.
+#   test_retrieval: at most 90 s for 200 questions (both public datasets,
+#                   199 questions, each search_dataset loading the index).
+#   test_limits:    both.
+INDEX_LIMIT     := 300
+PASS            := printf '\033[1;32mPASS\033[0m\n'
+FAIL            := printf '\033[1;31mFAIL\033[0m\n'
+RETRIEVAL_LIMIT := 90
+
+test_index:
+	@start=$$(date +%s%N); \
+	uv run -m src index --raw_dir $(BASE_DATA)/raw --index_dir $(BASE_INDEX) \
+		--max_chunk_size $(BASE_CHUNK) || exit 1; \
+	ms=$$(( ($$(date +%s%N) - start) / 1000000 )); \
+	echo "===== Indexing: $$(LC_ALL=C awk "BEGIN {printf \"%.1f\", $$ms / 1000}") s" \
+		"(limit $(INDEX_LIMIT) s)"; \
+	if [ $$ms -le $$(( $(INDEX_LIMIT) * 1000 )) ]; then $(PASS); \
+	else $(FAIL); exit 1; fi
+
+test_retrieval:
+	@questions=0; start=$$(date +%s%N); \
+	for dataset in $(BASE_DATASETS); do \
+		path=$(BASE_DATA)/datasets/UnansweredQuestions/$$dataset; \
+		uv run -m src search_dataset --dataset_path $$path --k $(BASE_K) \
+			--save_directory $(BASE_OUTPUT) --index_dir $(BASE_INDEX) \
+			|| exit 1; \
+		questions=$$(( questions + $$(grep -o '"question_id"' $$path | wc -l) )); \
+	done; \
+	ms=$$(( ($$(date +%s%N) - start) / 1000000 )); \
+	echo "===== Retrieval: $$questions questions in" \
+		"$$(LC_ALL=C awk "BEGIN {printf \"%.1f\", $$ms / 1000}") s (limit $(RETRIEVAL_LIMIT) s" \
+		"for 200 questions)"; \
+	if [ $$ms -le $$(( $(RETRIEVAL_LIMIT) * 1000 )) ]; then $(PASS); \
+	else $(FAIL); exit 1; fi
+
+test_limits: test_index test_retrieval
+
+# Answer battery: runs `answer` on every question of tests/answer_battery
+# (one file per question: a QUESTION: line and an EXPECTED: line) and prints
+# the expected answer after each one, to compare prompts by eye.
+# Needs the index (`make test_rag_base` or `uv run -m src index`).
+# Extra options for `answer`: ANSWER_ARGS="--k 5 --dtype bfloat16"
+ANSWER_DIR  := tests/answer_battery
+ANSWER_ARGS ?=
+
+test_answer:
+	@start=$$SECONDS; \
+	for file in $(ANSWER_DIR)/*.txt; do \
+		question=$$(sed -n 's/^QUESTION: //p' "$$file"); \
+		expected=$$(sed -n 's/^EXPECTED: //p' "$$file"); \
+		echo "===== $$(basename "$$file" .txt)"; \
+		echo "Question: $$question"; \
+		time uv run -m src answer "$$question" $(ANSWER_ARGS); \
+		echo "Expected: $$expected"; \
+		echo; \
+	done; \
+	echo "Battery total: $$((SECONDS - start)) s"
+
+# Same as test_answer, but on a whole AnsweredQuestions dataset: runs
+# `answer` on every question and prints its reference answer after it.
+# ~20 s per question (~35 min for 100). Options:
+#   ANSWER_DATASET=.../dataset_code_public.json   (default: docs)
+#   ANSWER_START=77       first question to run, 1-based (default 1)
+#   ANSWER_LIMIT=10       only N questions from there (0 = all)
+#   ANSWER_ARGS="..."     extra options for `answer`, as in test_answer
+#   ANSWER_LOG=path.log   where the output is also saved (default below,
+#                         one file per dataset, overwritten on each run)
+ANSWER_DATASET ?= $(BASE_DATA)/datasets/AnsweredQuestions/dataset_docs_public.json
+ANSWER_START   ?= 1
+ANSWER_LIMIT   ?= 0
+ANSWER_LOG     ?= $(BASE_DATA)/output/answer_logs/$(basename $(notdir $(ANSWER_DATASET))).log
+
+test_answer_dataset:
+	@mkdir -p $(dir $(ANSWER_LOG)); set -o pipefail; ( \
+	mapfile -t lines < <(uv run python -c 'import json, sys; \
+		qs = json.load(open(sys.argv[1]))["rag_questions"]; \
+		first = int(sys.argv[3]) - 1; n = int(sys.argv[2]); \
+		qs = qs[first:first + n] if n else qs[first:]; \
+		[print(q["question"].replace("\n", " ") + "\x1f" \
+		+ q.get("answer", "").replace("\n", " ")) for q in qs]' \
+		$(ANSWER_DATASET) $(ANSWER_LIMIT) $(ANSWER_START)) || exit 1; \
+	total=$${#lines[@]}; n=$$(( $(ANSWER_START) - 1 )); start=$$SECONDS; \
+	last=$$(( n + total )); \
+	for line in "$${lines[@]}"; do \
+		n=$$((n + 1)); \
+		question=$${line%%$$'\x1f'*}; \
+		expected=$${line#*$$'\x1f'}; \
+		echo "===== [$$n/$$last]"; \
+		echo "Question: $$question"; \
+		time uv run -m src answer "$$question" $(ANSWER_ARGS) < /dev/null; \
+		echo "Expected: $$expected"; \
+		echo; \
+	done; \
+	echo "Dataset total: $$total questions in $$((SECONDS - start)) s" \
+	) 2>&1 | tee $(ANSWER_LOG); \
+	echo "Saved to $(ANSWER_LOG)"
 
 clean:
 	@find . -path ./.venv -prune -o -type d -name '__pycache__' -exec rm -rf {} +
@@ -86,4 +191,4 @@ cleandata:
 	@find $(BASE_DATA)/output -type f -name '*.json' -delete
 	@echo "Index and generated outputs removed"
 
-.PHONY: all install run debug lint lint-strict test test_rag test_rag_base clean cleandata
+.PHONY: all install run debug lint lint-strict test test_rag test_rag_base test_index test_retrieval test_limits test_answer test_answer_dataset clean cleandata

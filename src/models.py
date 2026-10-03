@@ -4,8 +4,13 @@ The first group follows the subject's Data Models section; the rest are
 internal to the project (documents, chunks, hits and the saved index).
 """
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+# How ``Generator`` loads the model (``answer --dtype``). Defined here, not
+# in ``generator``, so the CLI can use it without importing torch.
+DtypeMode = Literal["auto", "float32", "bfloat16"]
 
 
 class MinimalSource(BaseModel):

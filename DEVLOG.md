@@ -402,6 +402,175 @@ Same battery, old vs new prompt: bitsandbytes min version ✅/✅; `--turbo-mode
 - Plan B (no prompt): skip the model when the best BM25 score is very low (the threshold is hard to choose).
 - **Measured (2026-10-03):** "Paris" is now refused ✅, `--turbo-mode` refused ✅, bitsandbytes ✅, but **Marlin and LoRA (valid, correct before) are refused ❌**. The risk happened. To decide: shorter wording, drop the rule, or plan B.
 
+**Answer battery (`make test_answer`)**
+- 10 questions in `tests/answer_battery/`, one file each (`QUESTION:` / `EXPECTED:` lines): 4 docs and 4 code questions from the public datasets (LoRA reworded so it does not name vLLM), 1 off-topic ("capital of France") and 1 trap (`--turbo-mode`, does not exist). The rule runs `answer` on each one and prints the expected answer after it. Extra options: `ANSWER_ARGS="--k 5 --dtype bfloat16"`. ~4 min for the 10.
+- Not in `tests/data/` because that folder is in `.gitignore`.
+
+**Decoding: greedy vs sampling (Qwen docs read on 2026-10-03)**
+- The Qwen3-0.6B model card recommends sampling: thinking mode `temperature=0.6, top_p=0.95, top_k=20` and *"DO NOT use greedy decoding"*; non-thinking mode (ours) `temperature=0.7, top_p=0.8, top_k=20, min_p=0`. The model's `generation_config.json` has `do_sample: true` with the thinking-mode values.
+- The subject says nothing about decoding (no greedy, sampling, temperature or seed). The only "reproducible" (VI.7.1) is about the retrieval pipeline layout. So both are allowed.
+- Battery with the current prompt (short system prompt + reminder with the off-topic rule):
+
+| # | Question | Greedy (`do_sample=False`) | Sampling (`do_sample=True`, defaults of `generation_config.json`) | **Greedy, no off-topic rule** |
+|---|---|---|---|---|
+| 01 | bitsandbytes version | ✅ 0.46.1 | ✅ 0.46.1 | ✅ 0.46.1 |
+| 02 | Marlin MOE architectures | ❌ refuses | ❌ refuses | ✅ `8.0;8.7;9.0+PTX` |
+| 03 | load a LoRA adapter | ❌ refuses | ❌ refuses | ✅ endpoint, fields and example |
+| 04 | security issues | 🟡 "privately, GitHub security advisory" | ❌ refuses | 🟡 same |
+| 05 | Mixtral quantization | ❌ refuses | ❌ refuses | ❌ exact list from another chunk |
+| 06 | `pad_to` default | ❌ "1" (invented) | ❌ "1" (invented) | ❌ "1024" (invented) |
+| 07 | HybridKV block size | ✅ (plus an extra sentence) | ❌ refuses | ❌ relation reversed |
+| 08 | `use_bitsandbytes_4bit` default | ❌ refuses | ❌ refuses | ✅ `False` |
+| 09 | capital of France | ✅ refuses | ✅ refuses | ❌ "Paris" |
+| 10 | `--turbo-mode` | ✅ refuses | ✅ refuses | ✅ refuses |
+
+- Valid questions refused: **4 greedy → 6 sampling**. Sampling makes the same problem worse: the model already hesitates between answering and refusing, and randomness adds to it.
+- Caveats: one run only (sampling changes between runs; fix `torch.manual_seed(0)` to compare), and the sampling run used the thinking-mode defaults, not the recommended non-thinking values.
+- **Decision: keep greedy.** Better here, and reproducible, so the battery compares prompts fairly.
+- The real problem is the prompt: 4 of 8 valid questions refused because of the off-topic rule. Next: drop that sentence from `REMINDER` (without it Marlin and LoRA were right, only "Paris" failed), then try a few-shot refusal example instead of the rule.
+
+**Off-topic rule dropped (greedy)** — `REMINDER` is now only *"Answer with the exact values from the context."*; `SYSTEM_PROMPT` unchanged (last column above).
+- Valid questions: **2 right + 1 partial → 4 right + 1 partial** of 8 (02 Marlin, 03 LoRA, 08 `False` fixed). No valid question refused any more.
+- Lost: 09 "Paris" again (expected without the rule) and **07 now reverses the relation**: a wrong answer that looks right, worse than a refusal.
+- Why the remaining failures happen (right chunk's rank in the BM25 results vs chunks that fit in `MAX_CONTEXT_TOKENS = 2500`):
+
+| # | Right chunk rank | Chunks in context | Kind of failure |
+|---|---|---|---|
+| 04 security issues | 2 | 7 | generation (partial answer) |
+| 05 Mixtral | **7** | **6** | **retrieval / budget**: the right chunk never reaches the model, so it copies a list from another chunk |
+| 06 `pad_to` | 1 | 6 | generation: the answer is a constant name, the model invents a number |
+| 07 HybridKV | 1 | 5 | generation: reads the right chunk and reverses it |
+
+- Next: a few-shot refusal example for "Paris" (teach by example instead of a rule); then try a larger `MAX_CONTEXT_TOKENS` for 05 (costs prompt time: ~2,000 tokens ≈ 10 s).
+
+**`MAX_CONTEXT_TOKENS` 2500 → 3500** (same prompt, greedy) — worse, reverted:
+
+| # | 2500 | 3500 |
+|---|---|---|
+| 01 bitsandbytes | ✅ | ✅ |
+| 02 Marlin | ✅ | 🟡 right values, wrong variable name (`CUDA_ARCHS`) |
+| 03 LoRA | ✅ | ❌ quotes `lora_name="adapter"` from a test, no endpoint |
+| 04 security | 🟡 | ❌ copies the list of steps of the security team |
+| 05 Mixtral | ❌ list from another chunk | ❌ 2 of 6 right (`gptq_marlin`, `awq_marlin`) plus a wrong one (`ipex`) |
+| 06 `pad_to` | ❌ "1024" | ❌ "1" |
+| 07 HybridKV | ❌ reversed | ❌ reversed |
+| 08 `use_bitsandbytes_4bit` | ✅ | ✅ |
+| 09 France | ❌ | ❌ |
+| 10 turbo-mode | ✅ | ✅ |
+
+- Valid questions: 4 right + 1 partial → **2 right + 1 partial**. More chunks = more distractors: the model copies values from the wrong chunk (03 from a test file, 04 a nearby list). Also ~5 s slower per answer.
+- 05 gets part of the right list (its chunk now fits) but mixes it with others: more context does not fix it.
+- Side effect seen in 02, 03 and 07: the model repeats the reminder ("The exact values are: …"). The wording of `REMINDER` leaks into the answers.
+- **Decision: keep 2500.**
+
+**Few-shot examples, then a new `REMINDER`** (greedy, `MAX_CONTEXT_TOKENS = 2500`) — **best prompt so far**
+- Few-shot: two invented example turns before the real question (`Generator._build_messages` / `_user_message`): one answered by quoting the context (`max_retries = 3` in a fake `ServerConfig`) and one unrelated question refused ("Who wrote Don Quixote?" → the fixed `REFUSAL`). Teaching by example instead of the off-topic rule. ~200 extra prompt tokens (< 1 s).
+- Then `REMINDER` changed from *"Answer with the exact values from the context."* (the model copied it into its answers: "The exact values are: …") to *"Answer the question using the context above."* The "exact values" instruction stays in `SYSTEM_PROMPT` and is shown by the example.
+
+| # | No off-topic rule | + few-shot | **+ new `REMINDER`** |
+|---|---|---|---|
+| 01 bitsandbytes | ✅ | ✅ | ✅ |
+| 02 Marlin | ✅ | ⚪ refuses | ✅ `8.0;8.7;9.0+PTX` (calls the variable `CUDA_ARCHS`, minor) |
+| 03 LoRA | ✅ | ❌ values from a test file | ✅ endpoint + `curl` example |
+| 04 security | 🟡 | 🟡 | 🟡 "follow the security policy" |
+| 05 Mixtral | ❌ list from another chunk | ⚪ refuses | ⚪ refuses (honest: the right chunk does not fit in the context) |
+| 06 `pad_to` | ❌ invents "1024" | ✅ `DEFAULT_VOCAB_PADDING_SIZE` | ✅ |
+| 07 HybridKV | ❌ reversed | 🟡 incomplete | 🟡 quotes the source (see below) |
+| 08 `use_bitsandbytes_4bit` | ✅ | ✅ | ✅ |
+| 09 France | ❌ "Paris" | ✅ refuses | ✅ refuses |
+| 10 turbo-mode | ✅ | ✅ | ✅ |
+| **Score** (✅ 2, 🟡 1, ⚪ 0, ❌ −1) | 7 | 11 | **16** |
+| **Hallucinations** (wrong and confident) | 4 | 1 | **0** |
+
+- Few-shot alone: same number of right answers, hallucinations 4 → 1 ("Paris" refused, `DEFAULT_VOCAB_PADDING_SIZE` quoted like the example quotes a name). The new reminder then recovered Marlin and LoRA: the old wording was leaking into the answers.
+- Many general-knowledge questions tried by hand: all refused. Next to try: off-corpus questions that *sound technical* (Python GIL, CUDA unified memory, installing PyTorch with conda), where the model knows the answer and the context looks relevant.
+- **07 is a finding about the source, not a hallucination.** `vllm/v1/core/kv_cache_coordinator.py:297` checks `other_block_size % full_attention_block_size == 0` (other divisible by full, as the dataset says), but its assertion message says *"assumes the block_size of full attention layers is divisible by other layers"*: the opposite. The model quotes that message. Grounded does not always mean correct when the source contradicts itself.
+- Remaining: 04 (partial) and 05 (retrieval: the right chunk ranks 7th, only 6 fit).
+
+**`MAX_CONTEXT_TOKENS` 2500 → 2800 with the best prompt** — chosen as the smallest budget where the Mixtral chunk (rank 7) fits; most questions get one more chunk. Worse, reverted:
+- Score **16 → 13**, still no confident hallucination. Changes: 02 better (no wrong variable name); **03 broken** (answers with a heading: "`Load LoRA Adapter`"); **05 still refused although its chunk is now in the context**. The rest is unchanged.
+- Second time a bigger context loses (3500 earlier): with this 0.6B model, one more chunk distracts more than it helps, and having the right chunk is not enough (05). **Keep 2500**; the context budget is closed.
+
+**Thinking mode (`enable_thinking=True`) — tried with a temporary `--think` flag, discarded**
+- Set-up: a copy of the good `generator.py` kept aside, a temporary `--think` flag on `answer`. In thinking mode: sampling with the model card's values (`temperature=0.6, top_p=0.95, top_k=20`, the card says not to use greedy here), `torch.manual_seed(0)`, up to 2048 new tokens, only the text after `</think>` (token id 151668) returned.
+- RAM: only the KV cache grows (~0.23 MB per token in float32, so ~0.3–0.6 GB more for 1,000–2,500 reasoning tokens), below the loading peak. The real cost is time (~150 ms per token).
+
+| Test | Reasoning | Answer | Time |
+|---|---|---|---|
+| 05 Mixtral, `MAX_CONTEXT_TOKENS = 2500` (right chunk not in the context) | 791 tokens | refusal (correct: the data is missing) | 150 s |
+| 05 Mixtral, `MAX_CONTEXT_TOKENS = 2800` (right chunk in the context) | 249 tokens | ❌ `gptq_marlin_24` and `gptq_marlin`: 1 of 6 right plus one from another chunk's list | 65 s |
+
+- With the right chunk in the context and reasoning, the model still picks the wrong list among similar chunks, and turns an honest refusal into a confident wrong answer. 3–7× slower (20 s → 65–150 s per answer; ~100 questions would take hours).
+- **Decision: discarded.** Back to the good `generator.py` (greedy, no thinking, `MAX_CONTEXT_TOKENS = 2500`); flag and copy removed.
+
+**Context budget sweep with the best prompt** (greedy, few-shot, new `REMINDER`)
+
+Whole battery (score: ✅ 2, 🟡 1, ⚪ 0, ❌ −1):
+
+| `MAX_CONTEXT_TOKENS` | Score | Confident wrong answers | Changes against 2500 | Time per answer |
+|---|---|---|---|---|
+| 1500 | 12–14 | 0 | 03 LoRA ❌ (answers with a heading), 04 security ✅, 07 quotes another condition | |
+| 2000 | 15 | 1 (07 reversed again) | 03 ⚪ refuses, 04 ✅ | ~15 s (battery 159 s) |
+| **2500** | **16** | **0** | — | ~20 s |
+| 2800 | 13 | 0 | 03 ❌ heading, 05 still refused with its chunk in the context | |
+| 3500 | (older prompt) | | more chunks copied from the wrong place | |
+
+Questions 03 and 04 only, with the budget changed in memory (`Generator.MAX_CONTEXT_TOKENS = N` in a `python -c` loop, without editing the file):
+
+| Budget | Chunks in context (03 / 04) | 03 LoRA | 04 security |
+|---|---|---|---|
+| 2000 | 5 / 6 | ⚪ refuses | ✅ "privately, vulnerability submission form on GitHub" |
+| 2100 | 5 / 6 | ⚪ refuses | ✅ |
+| **2200** | **6 / 6** | ✅ endpoint + `curl` example | ✅ |
+| 2300 | 6 / 7 | ✅ | 🟡 "follow the security policy" |
+| 2400 | 6 / 7 | ✅ | 🟡 |
+| 2500 | 6 / 7 | ✅ | 🟡 |
+
+- The answers only change when the **number of chunks** changes (03 at 5 → 6 chunks, 04 at 6 → 7): the budget matters only through how many chunks fit.
+- **2200 is the only budget where both are right.**
+- The cause is not logical, it is sensitivity: for 03 both `docs/features/lora.md` chunks are already in the context with 5 chunks; the 6th one that makes it answer is a test file (`test_lora_adapters.py`). For 04 the 7th chunk (`docs/usage/security.md`) makes the answer vaguer. A 0.6B model is fragile to the exact mix of chunks, so 2200 may just be good for these two.
+- Confirmed with the whole battery at **2200**: score **17** (best so far), still **0 invented answers**. 01–04, 06, 08 ✅; 05 refused (honest); 07 quotes vLLM's own misleading assertion message, as with 2500; 09 and 10 refused. Battery 190 s (~19 s per answer).
+- **Decision: `MAX_CONTEXT_TOKENS = 2200`.** Final prompt: short `SYSTEM_PROMPT` with the fixed `REFUSAL`, two few-shot examples, `REMINDER` *"Answer the question using the context above."*, greedy, no thinking, `MAX_NEW_TOKENS = 150`. Generation tuning closed: the remaining failures (05, 07) are model or source limits.
+
+**Full docs dataset with the final prompt** (`make test_answer_dataset`, 100 questions of `dataset_docs_public.json`, `MAX_CONTEXT_TOKENS = 2200`, greedy). Output saved by hand in `answer.log` (the terminal copy lost some spaces at line breaks, e.g. `andWARP_SIZE`; questions were matched to the dataset ignoring whitespace). Each answer judged by hand against the reference answer, and crossed with retrieval (is the right chunk among the chunks that fit in the context?).
+
+| Result | Count | Right chunk in the context | Right chunk not in the context |
+|---|---|---|---|
+| ✅ correct | **50** | 48 | 2 (found in another chunk) |
+| 🟡 partial / vague / correct but with a contradictory tail | 19 | 17 | 2 |
+| ⚪ refusal | 20 | 16 | 4 (honest: the data was missing) |
+| ❌ wrong answer | 11 | 8 | 3 |
+
+- Score (✅ 2, 🟡 1, ⚪ 0, ❌ −1): **108 / 200**. Correct or partial: **69 %**. Wrong and confident: **11 %**.
+- Retrieval vs generation: the right chunk reached the model in **89 / 100** questions, so most of the loss is in generation. With the chunk in the context: 48 ✅, 17 🟡, 16 ⚪, 8 ❌.
+- Time: **2,134 s (35.6 min)**, mean **21.3 s**, median 19.9 s, min 13.8 s, max 57.8 s. Refusals 16.3 s on average, answers 22.6 s. 6 answers above 30 s, all long lists or code blocks (13, 54, 55, 56, 70, 96).
+
+Patterns found:
+1. **Few-shot leak (4 answers: 18, 30, 46, 97).** The example answer ends with `(ServerConfig)` and the model copies it: "`--runner pooling` (ServerConfig)", and in 18 the whole example ("`max_retries = 3` (ServerConfig)"). Fix to try: an example answer without the parenthetical source, or with a less copyable one.
+2. **Answer plus refusal (6 answers: 24, 44, 60, 80, 82, 86).** A correct answer followed by "The context does not contain the answer.", which contradicts it. Fix to try in code: if the answer has more than the refusal sentence, remove that sentence at the end.
+3. **Over-refusal (16 refusals with the right chunk in the context).** The main remaining loss: questions about where to find something ("Where can I find…", 6, 10, 38, 91) and broad questions (4, 9, 26). The price of 0 hallucinations on the battery.
+4. **Wrong answers (11):** answering from a nearby but wrong chunk (39 logging variables for multimodal LoRAs, 49 quantization lists, 68 requirements), or with the data missing (3 `encode` instead of `embed`, 22 `FP4PerGroupSpec` instead of `quantization='quark'`).
+5. Narrow references: some answers judged 🟡 are fuller than the reference (27 extra structured-output backends, 90 more OpenAI APIs, 52 another audio model).
+
+`answer_dataset` estimate with these times: ~36 min per 100 questions (the model is loaded once there, ~5 s less per question: ~30 min).
+
+**Regression after fixing patterns 1 and 2** (`EXAMPLE_ANSWER` without the trailing `(ServerConfig)`; `Generator._clean_answer` drops the refusal sentence from an answer that has content). Same 100 questions, judged by hand against the first run. Questions 1–76 in `data/output/answer_logs/dataset_docs_public.log`; the run then hung on question 77 (see below) and 77–100 were run again with `ANSWER_START=77` (`docs_v2_77_100.log`).
+
+| Result | First run | After the fixes |
+|---|---|---|
+| ✅ correct | 50 | **58** |
+| 🟡 partial | 19 | 18 |
+| ⚪ refusal | 20 | **11** |
+| ❌ wrong | 11 | 13 |
+| **Score** (✅ 2, 🟡 1, ⚪ 0, ❌ −1) | 108 | **121** |
+| Few-shot leak / answer + refusal | 4 / 6 | **0 / 0** |
+| Mean time per question | 21.3 s | ~22 s |
+
+- Both fixes work: no `(ServerConfig)` anywhere, and answers like 24 (`e5be006`), 44, 80, 86 lost the contradictory refusal and became ✅.
+- Side effect of the new example answer (one full sentence, no parenthetical): the model refuses less (20 → 11). Most of the new answers are right (9 reproducibility, 39 `--default-mm-loras`, 58 the full `lm_eval` command, 69 sharding at init, 88 RLHF, 95 `MAX_JOBS=6`), but two refusals became confident wrong answers: **73** (invents `vLLM_USE_V1=1` as a version; the right chunk was not in the context) and **96** (`response_parsed` instead of `message.parsed`). Same trade-off as always: fewer refusals, a few more inventions; the balance is clearly positive (+13).
+
+**Network hang** — question 77 stayed asleep for minutes on an open HTTPS connection to Hugging Face (`ss` showed `ESTAB … :443`, 3 % CPU): `from_pretrained` asks the Hub for updates on every run, even with the model cached, and that request never answered. Fix: `Generator._from_pretrained` loads the model and the tokenizer with `local_files_only=True` first (no network request at all) and only downloads when they are not cached; a failed download is a clean `RagError`. Checked with no network at all (`unshare -rn`): `answer` works. The 24 questions after the fix ran without any hang.
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
@@ -486,6 +655,8 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [ ] `answer`: JSON output (`MinimalAnswer` in `StudentSearchResultsAndAnswer`), no-hits case, `index_dir` in the docstring.
 - [ ] `answer_dataset` (reads results with `_open_file_save`, re-reads the source texts, one `Generator`, tqdm). Maybe save every N questions, so a crash does not lose everything.
 - [ ] Off-topic rule in `REMINDER`: refuses valid questions (Marlin, LoRA). Decide: shorter wording, drop it, or skip the model when the best BM25 score is very low.
+
+**Memory-safe model loading — implemented 2026-10-03** (`Generator._get_available_ram`, `_choose_dtype`). Bugs found by testing: `"MemAvaiable:"` typo (always `None` → always bfloat16) and `dtype` passed positionally (`TypeError` in `Qwen3ForCausalLM.__init__`, so `answer` was broken). Verified with the real CLI: 9.4 GB → float32 (19 s, 5.0 GB peak); no meminfo → bfloat16 (42 s, 2.6 GB); 2 GB → clean error, exit 1, model not loaded. Pending: unit tests and docstrings (the `--dtype` flag and the English of the messages are done).
 
 **Memory-safe model loading** (with too little RAM the kernel kills the process: `Killed`, exit 137, no Python exception, nothing to catch)
 - [ ] Measured peaks (`/usr/bin/time -f %M`): `answer` in **float32 ~5.1 GB**, in **bfloat16 ~3.0 GB** (both include the index and the bf16 → fp32 conversion while loading); `search` alone ~0.45 GB.
