@@ -372,6 +372,30 @@ class TestProjectBoundary:
         result = CorpusReader(root).read()
         assert [d.file_path for d in result.documents] == ["data/raw/a.md"]
 
+    def test_symlinked_corpus_outside_accepted(self, root: Path) -> None:
+        """``data/raw`` may be a link to another disk (``goinfre``): it is
+        read, and the paths keep the ``data/raw/...`` form.
+        """
+        target = root.parent / "goinfre" / "raw"
+        (target / "docs").mkdir(parents=True)
+        (target / "docs" / "c.md").write_text("c", encoding="utf-8")
+        (root / "data" / "linked").symlink_to(target)
+        result = CorpusReader(root / "data" / "linked").read()
+        assert [d.file_path for d in result.documents] == [
+            "data/linked/docs/c.md"]
+
+    def test_symlinked_corpus_relative_path(
+            self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The same through a relative ``--raw_dir``."""
+        target = root.parent / "goinfre" / "raw"
+        target.mkdir(parents=True)
+        (target / "d.md").write_text("d", encoding="utf-8")
+        (root / "data" / "linked").symlink_to(target)
+        monkeypatch.chdir(root)
+        result = CorpusReader("data/linked").read()
+        assert [d.file_path for d in result.documents] == [
+            "data/linked/d.md"]
+
     def test_relative_path_safety_net(self, root: Path) -> None:
         """``_relative_path`` still rejects a file outside the root and
         chains the original ``ValueError``.
@@ -422,3 +446,33 @@ class TestRealCorpus:
         docs = {d.file_path: d.text for d in result.documents}
         text = docs["data/raw/vllm-0.10.1/docs/features/lora.md"]
         assert text[4695:4718] == "### Using API Endpoints"
+
+
+class TestProjectPath:
+    """``project_path``: source paths read by ``answer_dataset``."""
+
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A fake project root."""
+        root = tmp_path / "project"
+        root.mkdir()
+        monkeypatch.setattr(CorpusReader, "PROJECT_ROOT", root)
+        return root
+
+    def test_relative_path_inside(self, root: Path) -> None:
+        """A corpus path is taken from the project root."""
+        assert (CorpusReader.project_path("data/raw/a.md")
+                == root / "data" / "raw" / "a.md")
+
+    def test_dots_inside_normalised(self, root: Path) -> None:
+        """``..`` that stays inside the project is fine."""
+        assert (CorpusReader.project_path("data/raw/../raw/a.md")
+                == root / "data" / "raw" / "a.md")
+
+    @pytest.mark.parametrize("path", [
+        "/etc/passwd", "../../.ssh/id_rsa", "data/../../outside.md", "..",
+    ])
+    def test_outside_rejected(self, root: Path, path: str) -> None:
+        """Absolute paths and ``..`` leaving the project are refused."""
+        with pytest.raises(CorpusError, match="outside the project root"):
+            CorpusReader.project_path(path)

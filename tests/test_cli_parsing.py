@@ -34,8 +34,10 @@ class TestValidArguments:
         ["search_dataset", "--dataset_path", DOCS_DATASET, "--k", "10",
          "--save_directory", "folder/that/does/not/exist/yet"],
         ["answer", "How to use LoRA?", "--k", "3"],
-        ["answer_dataset", "--student_search_results_path", DOCS_DATASET],
-        ["answer_dataset", "--student_search_results_path", DOCS_DATASET,
+        ["answer_dataset", "--student_search_results_path",
+         "folder/results.json"],
+        ["answer_dataset", "--student_search_results_path",
+         "folder/results.json",
          "--save_directory", "folder/that/does/not/exist/yet"],
         ["evaluate", "--student_search_results_path", "folder/results.json",
          "--dataset_path", DOCS_ANSWERED],
@@ -49,9 +51,12 @@ class TestValidArguments:
         body: reaching the body means validation already passed. ``index``
         saves into a temporary folder, never into ``data/processed``, and
         ``search_dataset`` writes its results into a temporary folder too.
-        ``evaluate`` gets a small valid results file.
+        ``evaluate`` and ``answer_dataset`` get a small valid results file
+        (no questions, so ``answer_dataset`` never loads the model), and
+        ``answer`` an index where the question matches nothing (no
+        sources, so the model is not loaded either).
         """
-        if command[0] == "evaluate":
+        if command[0] in ("evaluate", "answer_dataset"):
             (tmp_path / "folder").mkdir()
             (tmp_path / "folder" / "results.json").write_text(
                 '{"search_results": [], "k": 10}', encoding="utf-8")
@@ -62,6 +67,14 @@ class TestValidArguments:
         if command[0] == "search_dataset":
             if "--save_directory" not in command:
                 command = [*command, "--save_directory", str(tmp_path)]
+        if command[0] == "answer_dataset":
+            if "--save_directory" not in command:
+                command = [*command, "--save_directory", str(tmp_path)]
+        if command[0] == "answer":
+            chunk = Chunk(file_path="data/raw/a.md", first_character_index=0,
+                          last_character_index=12, text="Nothing here")
+            BM25Index.build([chunk]).save(tmp_path)
+            command = [*command, "--index_dir", str(tmp_path)]
         if command[0] in ("search", "search_dataset"):
             chunk = Chunk(file_path="data/raw/a.md", first_character_index=0,
                           last_character_index=15, text="How to use LoRA")

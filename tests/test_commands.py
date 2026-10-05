@@ -7,8 +7,8 @@ import pytest
 from pydantic import Field, FilePath, ValidationError
 
 from src.commands import CliCommand, RagCLI
-from src.exceptions import ArgError, DatasetError, PathError
-from src.models import RagDataset, StudentSearchResults
+from src.exceptions import ArgError, CorpusError, DatasetError, PathError
+from src.models import MinimalSource, RagDataset, StudentSearchResults
 
 COMMANDS = ["index", "search", "search_dataset", "answer",
             "answer_dataset", "evaluate"]
@@ -200,3 +200,42 @@ class TestOpenFileSave:
         path.write_text(self.VALID, encoding="utf-8")
         with pytest.raises(DatasetError):
             RagCLI._open_file_save(path, StudentSearchResults)
+
+
+class TestLoadChunks:
+    """``answer_dataset`` re-reads the text of each retrieved source."""
+
+    @staticmethod
+    def source(path: str, start: int = 0, end: int = 5) -> MinimalSource:
+        """A retrieved source."""
+        return MinimalSource(file_path=path, first_character_index=start,
+                             last_character_index=end)
+
+    def test_reads_slice(self) -> None:
+        """The chunk text is the slice of the real corpus file."""
+        path = "README.md"
+        text = (Path(__file__).resolve().parent.parent / path).read_text(
+            encoding="utf-8")
+        chunks = RagCLI._load_chunks([self.source(path, 3, 20)], {})
+        assert chunks[0].text == text[3:20]
+
+    def test_file_read_once(self) -> None:
+        """Sources of the same file share the cache."""
+        files: dict[str, str] = {"cached.md": "0123456789"}
+        chunks = RagCLI._load_chunks(
+            [self.source("cached.md", 0, 3), self.source("cached.md", 5, 9)],
+            files)
+        assert [c.text for c in chunks] == ["012", "5678"]
+
+    @pytest.mark.parametrize("path", ["/etc/passwd", "../../.ssh/id_rsa"])
+    def test_outside_project_rejected(self, path: str) -> None:
+        """A JSON cannot make the generator read files outside the
+        project: absolute paths and ``..`` are refused before reading.
+        """
+        with pytest.raises(CorpusError, match="outside the project root"):
+            RagCLI._load_chunks([self.source(path)], {})
+
+    def test_missing_file(self) -> None:
+        """A source that no longer exists is a clean PathError."""
+        with pytest.raises(PathError):
+            RagCLI._load_chunks([self.source("data/raw/nope.md")], {})

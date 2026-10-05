@@ -291,25 +291,6 @@ class TestEvaluate:
         assert "Traceback" not in err
 
 
-class TestPendingCommands:
-    """Commands not written yet fail loudly and cleanly.
-
-    When a command gets implemented, remove it from this list.
-    """
-
-    @pytest.mark.parametrize("args", [
-        ("answer_dataset", "--student_search_results_path", DOCS_DATASET),
-    ])
-    def test_not_implemented(self, runner: Runner,
-                             args: tuple[str, ...]) -> None:
-        """Exit 1 with ``NotImplementedError`` and no traceback."""
-        code, err = runner.run(*args)
-        assert code == 1
-        assert "NotImplementedError" in err
-        assert f"{args[0]} is not implemented yet" in err
-        assert "Traceback" not in err
-
-
 class TestIndex:
     """The ``index`` command: read, chunk, build and save the index.
 

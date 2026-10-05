@@ -1,4 +1,5 @@
 """Read the corpus files that will be indexed."""
+import os
 from pathlib import Path
 
 from tqdm import tqdm
@@ -13,6 +14,11 @@ class CorpusReader:
     Paths are stored relative to the project root (``data/raw/...``),
     the form the moulinette compares verbatim.
 
+    Paths are normalised without following symbolic links: ``..`` is
+    removed as text, so ``--raw_dir ../`` is still outside the project,
+    but ``data/raw`` may be a link to a bigger disk (``goinfre`` on 42
+    computers) and stays ``data/raw/...``.
+
     Attributes:
         EXTENSIONS: File types that are read.
         PROJECT_ROOT: Folder the stored paths are relative to.
@@ -25,10 +31,35 @@ class CorpusReader:
         """Store the folder to read.
 
         Args:
-            path_to_read: Corpus folder; relative paths are resolved
-                from the working directory.
+            path_to_read: Corpus folder; relative paths are taken from
+                the working directory.
         """
-        self._path_to_read = Path(path_to_read).resolve()
+        self._path_to_read = Path(os.path.abspath(path_to_read))
+
+    @classmethod
+    def project_path(cls, path: Path | str) -> Path:
+        """Absolute path of a project file, refusing anything outside.
+
+        A relative path is taken from the project root. ``..`` and
+        absolute paths are normalised first, so ``../../.ssh/id_rsa`` or
+        ``/etc/passwd`` are rejected; symbolic links are not followed.
+        Used for the source files listed in a search results JSON.
+
+        Args:
+            path: A path such as ``data/raw/vllm-0.10.1/README.md``.
+
+        Returns:
+            The absolute, normalised path inside the project.
+
+        Raises:
+            CorpusError: The path is outside the project root.
+        """
+        absolute = Path(os.path.abspath(cls.PROJECT_ROOT / path))
+        if not absolute.is_relative_to(cls.PROJECT_ROOT):
+            raise CorpusError(
+                f"{path} is outside the project root {cls.PROJECT_ROOT}"
+            )
+        return absolute
 
     def _list_files(self) -> list[Path]:
         """Files of the folder, recursively, with a valid extension."""

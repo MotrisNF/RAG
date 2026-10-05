@@ -283,15 +283,17 @@ class RagCLI:
             One Chunk per source, in the same order.
 
         Raises:
+            CorpusError: A source path is outside the project root (an
+                absolute path or ``..`` in the JSON).
             PathError: A source file cannot be read, or is not UTF-8 text.
         """
         chunks: list[Chunk] = []
         for source in sources:
             if source.file_path not in files:
+                path = CorpusReader.project_path(source.file_path)
                 try:
-                    files[source.file_path] = (
-                        CorpusReader.PROJECT_ROOT / source.file_path
-                    ).read_text(encoding="utf-8")
+                    files[source.file_path] = path.read_text(
+                        encoding="utf-8")
                 except (OSError, UnicodeDecodeError) as e:
                     raise PathError(source.file_path, e) from e
             text = files[source.file_path]
@@ -419,9 +421,46 @@ class RagCLI:
             dtype: How to load the model, as in ``answer``.
         """
 
-        # The input first: a broken file fails before PyTorch is imported.
+        # The input first: a broken file, or a source path outside the
+        # project, fails before PyTorch is imported.
         results = self._open_file_save(student_search_results_path,
                                        StudentSearchResults)
+        for entry in results.search_results:
+            for source in entry.retrieved_sources:
+                CorpusReader.project_path(source.file_path)
+
+        results_list: list[MinimalAnswer] = []
+        if results.search_results:
+            results_list = self._answer_all(results, dtype)
+        output = StudentSearchResultsAndAnswer(
+            search_results=results_list,
+            k=results.k)
+        try:
+            Path(save_directory).mkdir(parents=True, exist_ok=True)
+            path = Path(save_directory) / student_search_results_path.name
+            path.write_text(output.model_dump_json(indent=2),
+                            encoding="utf-8")
+        except OSError as e:
+            raise PathError(save_directory, e) from e
+        print(f"File saved in '{path}'")
+
+    def _answer_all(self, results: StudentSearchResults,
+                    dtype: DtypeMode) -> list[MinimalAnswer]:
+        """Load the model once and answer every question of ``results``.
+
+        Only called when there is at least one question: an empty results
+        file never imports PyTorch.
+
+        Args:
+            results: The search results, with valid source paths.
+            dtype: How to load the model, as in ``answer``.
+
+        Returns:
+            One MinimalAnswer per question, in the same order.
+
+        Raises:
+            RagError: PyTorch or the model cannot be loaded.
+        """
         try:
             print("Loading PyTorch...", file=sys.stderr)
             from .generator import Generator
@@ -452,17 +491,7 @@ class RagCLI:
                     answer=answer
                 )
             )
-        output = StudentSearchResultsAndAnswer(
-            search_results=results_list,
-            k=results.k)
-        try:
-            Path(save_directory).mkdir(parents=True, exist_ok=True)
-            path = Path(save_directory) / student_search_results_path.name
-            path.write_text(output.model_dump_json(indent=2),
-                            encoding="utf-8")
-        except OSError as e:
-            raise PathError(save_directory, e) from e
-        print(f"File saved in '{path}'")
+        return results_list
 
     @CliCommand.validated
     def evaluate(

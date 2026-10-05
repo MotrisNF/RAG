@@ -13,11 +13,13 @@ A small language model cannot know the details of a specific codebase, and when 
 
 The project is judged on both parts: retrieval is measured with **recall@k** against reference datasets (targets: recall@5 ≥ 80 % on documentation questions and ≥ 50 % on code questions), and answers must be coherent, on point and grounded in the retrieved sources.
 
-Current results (public datasets, recall@5): **docs 87 %, code 75.8 %**. Indexing takes ~2 s and each 100-question dataset is searched in under 1 s.
+Current results:
+- **Retrieval** (public datasets, recall@5): **docs 87 %, code 75.8 %**. Indexing takes ~2 s and each 100-question dataset is searched in under 1 s.
+- **Generation** (the 100 public docs questions, judged by hand against the reference answers): **58 correct, 18 partly correct, 11 refusals, 13 wrong**, ~22 s per answer on CPU.
 
 Everything is exposed through a command-line interface (Python Fire): `index`, `search`, `search_dataset`, `answer`, `answer_dataset` and `evaluate`.
 
-> **Status (2026-10-03):** retrieval and the `answer` command are working. `answer_dataset` is in progress.
+> **Status (2026-10-05):** mandatory part complete: the six commands work end to end. Next: the bonus part.
 
 ## Instructions
 
@@ -75,6 +77,9 @@ Every input and output path is a CLI option with a default; nothing is hard-code
 | `make test` | The test suite (`pytest`) |
 | `make test_rag` | Full pipeline (index → search_dataset → evaluate) on the mini corpus in `tests/data` |
 | `make test_rag_base` | Same on the real data, like the moulinette (k = 10, chunks of 2000) |
+| `make test_index` / `make test_retrieval` / `make test_limits` | Check the subject time limits (indexing ≤ 5 min, 200 questions ≤ 90 s): prints the time and PASS / FAIL |
+| `make test_answer` | `answer` on the 10 questions of `tests/answer_battery/`, each followed by its expected answer |
+| `make test_answer_dataset` | `answer` on every question of an AnsweredQuestions dataset, with its reference answer; the output is saved to `data/output/answer_logs/` |
 | `make clean` / `make cleandata` | Remove caches / remove the generated index and outputs |
 
 ## Example usage
@@ -123,14 +128,32 @@ The same with the official grader:
 ### Answer a question
 
 ```bash
-$ uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?"
-The minimum version of bitsandbytes required for vLLM quantization is 0.46.1.
-
-$ uv run -m src answer "How do I enable the --turbo-mode flag in vLLM?"
-The context does not contain the answer.
+$ uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --k 5
 ```
 
-(`--turbo-mode` does not exist: the model refuses instead of inventing it.)
+Prints a `StudentSearchResultsAndAnswer` JSON with one entry: the sources given to the model and its answer (abridged):
+
+```json
+{
+  "search_results": [
+    {
+      "question_id": "…",
+      "question": "What is the minimum version of bitsandbytes required for vLLM quantization?",
+      "retrieved_sources": [
+        {"file_path": "data/raw/vllm-0.10.1/vllm/model_executor/layers/quantization/bitsandbytes.py", "first_character_index": 15340, "last_character_index": 16778},
+        …
+      ],
+      "answer": "The minimum version of bitsandbytes required for vLLM quantization is `bitsandbytes >= 0.46.1`."
+    }
+  ],
+  "k": 5
+}
+```
+
+Progress messages (`Loading PyTorch...`, `Torch mode: float32`) go to stderr, so the JSON can be redirected. Other answers:
+
+- *"How do I enable the --turbo-mode flag in vLLM?"* → `The context does not contain the answer.` (the flag does not exist: the model refuses instead of inventing it).
+- A query that matches nothing (`"???"`, only stopwords) → `No relevant sources were found in the corpus.`, without loading the model.
 
 ### Answer a whole dataset
 
@@ -140,7 +163,7 @@ uv run -m src answer_dataset \
   --save_directory data/output/search_results_and_answer/UnansweredQuestions
 ```
 
-Reads the output of `search_dataset` and writes a `StudentSearchResultsAndAnswer` JSON (in progress, see Status).
+Reads the output of `search_dataset`, re-reads the text of every retrieved source, loads the model **once** and answers each question with a progress bar, then writes a `StudentSearchResultsAndAnswer` JSON with the same file name. ~22 s per question on CPU (~35 min for 100). Every source path is checked before PyTorch is loaded: a path outside the project (`/etc/passwd`, `../..`) is rejected, and a file without questions is written without loading the model.
 
 ### Every option, with and without `make`
 
@@ -259,7 +282,7 @@ make run ARGS='answer "What is the minimum version of bitsandbytes required for 
 make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --dtype bfloat16'
 ```
 
-#### `answer_dataset` (in progress)
+#### `answer_dataset`
 
 | Option | Default | Description |
 |---|---|---|
@@ -300,6 +323,36 @@ make test_rag TEST_DATASET=dataset_mini_hard.json TEST_CHUNK=2000 TEST_K=10
 ```bash
 make test_rag_base
 make cleandata
+```
+
+Time limits of the subject, on the real data:
+
+| Variable | Default | Description |
+|---|---|---|
+| `INDEX_LIMIT` | `300` | Seconds allowed for `index` (`test_index`) |
+| `RETRIEVAL_LIMIT` | `90` | Seconds allowed for the 200 questions (`test_retrieval`) |
+
+```bash
+make test_limits
+make test_index INDEX_LIMIT=1        # see a FAIL
+```
+
+Answer batteries (they run the model: ~20 s per question):
+
+| Variable | Default | Description |
+|---|---|---|
+| `ANSWER_ARGS` | empty | Extra options for `answer` (`--k 5 --dtype bfloat16`) |
+| `ANSWER_DATASET` | `data/datasets/AnsweredQuestions/dataset_docs_public.json` | Dataset of `test_answer_dataset` |
+| `ANSWER_START` | `1` | First question to run |
+| `ANSWER_LIMIT` | `0` (all) | Number of questions from there |
+| `ANSWER_LOG` | `data/output/answer_logs/<dataset>.log` | Where the output is also saved |
+
+```bash
+make test_answer
+make test_answer ANSWER_ARGS="--k 5"
+make test_answer_dataset
+make test_answer_dataset ANSWER_START=77 ANSWER_LIMIT=10
+make test_answer_dataset ANSWER_DATASET=data/datasets/AnsweredQuestions/dataset_code_public.json
 ```
 
 ## System architecture
@@ -369,7 +422,15 @@ Only chunks that share at least one term are scored. The top k are taken with `h
 
 **Query stopwords.** Question words and common English words (`what`, `how`, `the`, `use`…) are removed from the **query only** (`Tokenizer.tokenize_query`). In a code corpus they are rare, so BM25 would give them a high idf (`why` 5.54, `how` 3.78, against 2.45 for `lora`), and chunks that only share the wording of the question would rank high.
 
-**Generation.** The ranked chunks, best first, are added with their file path until `MAX_CONTEXT_TOKENS` (2500, counted with Qwen's own tokenizer). The prompt has a short system message (answer only from the context, quote exact names and values, a fixed sentence when the answer is not there) and a user message with the context first and the **question last**, followed by a one-line reminder. Generation is greedy (`do_sample=False`), without Qwen3's thinking mode, and limited to `MAX_NEW_TOKENS` (256).
+**Generation** (`src/generator.py`).
+- **Context:** the ranked chunks, best first, each with its file path, until `MAX_CONTEXT_TOKENS` (**2200**, counted with Qwen's own tokenizer).
+- **Prompt:**
+  - a short system message: answer only from the context, quote the exact names and values, and a fixed refusal sentence when the answer is not there;
+  - **two few-shot examples** as earlier turns of the conversation, invented on purpose: one question answered by quoting a value, one unrelated question refused;
+  - the real user message: the context first, the **question last**, then a one-line reminder (*"Answer the question using the context above."*).
+- **Decoding:** greedy (`do_sample=False`), without Qwen3's thinking mode, at most `MAX_NEW_TOKENS` (150).
+- **Clean-up:** if an answer has content and also the refusal sentence, the refusal is removed (it contradicted the answer).
+- **Loading:** the model and the tokenizer are loaded from the local cache first (`local_files_only`), so a normal run makes no network request; the type (float32 / bfloat16) is chosen from the free memory (see Performance analysis).
 
 ## Performance analysis
 
@@ -390,7 +451,8 @@ Moulinette, chunks of 2000 characters, k = 10:
 | `search_dataset` (100 questions, including loading the 35 MB index) | < 1 s | 90 s for 200 questions |
 | Loading the index | ~0.35 s | |
 | `answer`: load Qwen3-0.6B | ~5.6 s | |
-| `answer`: one answer (prompt of ~2000 tokens) | ~12–17 s | |
+| `answer`: whole command (load + one answer) | ~15–25 s | no limit for generation |
+| `answer_dataset`-like run on the 100 docs questions (`make test_answer_dataset`) | ~37 min (~22 s per question) | |
 
 ### Evolution of recall@5
 
@@ -549,6 +611,121 @@ It makes chunks cleaner, which gives better context for the generator, not easie
 - **On all files it hurts docs:** two almost identical neighbour chunks take two of the five slots.
 - **On `.py` only the gain does not grow with the overlap** (200 > 400 > 600), so it is close to noise.
 
+### Semantic embeddings: choosing the model (bonuses 1 and 2, 2026-10-05)
+
+Before writing the vector index, five lightweight CPU models were measured on the real corpus (12,907 chunks of up to 2000 characters): the time to embed the whole corpus, and recall@k on the public datasets with the vectors alone and fused with BM25 by reciprocal rank fusion (`weight / (60 + rank)` per list). Vectors are L2-normalised, so the similarity is a dot product.
+
+**Speed** (this PC, 8 threads; the campus computers are ~3× slower):
+
+| Model | Kind | Size | Whole corpus | On campus (≈) |
+|---|---|---|---|---|
+| `sentence-transformers/all-MiniLM-L6-v2`, 256 tokens (default) | transformer | 88 MB | ~400 s | ~20 min |
+| `all-MiniLM-L6-v2`, cut to 128 tokens | transformer | 88 MB | 344 s | ~17 min |
+| `sentence-transformers/static-retrieval-mrl-en-v1` | static (averaged token vectors) | 121 MB | 5.2 s | ~16 s |
+| `minishlab/potion-retrieval-32M` (Model2Vec) | static | 125 MB | 2.1 s | ~6 s |
+| **`minishlab/potion-base-8M` (Model2Vec)** | static | **30 MB** | **2.0 s** | **~6 s** |
+
+MiniLM does not fit in the 5-minute indexing limit; a static model adds seconds.
+
+**Recall@5** (k = 10; vectors alone, and hybrid with BM25 at equal weight):
+
+| Retrieval | docs @5 | code @5 | docs @10 | code @10 |
+|---|---|---|---|---|
+| **BM25 (current)** | **0.870** | **0.758** | **0.920** | **0.818** |
+| MiniLM 256 tokens, vectors only | 0.510 | 0.374 | 0.580 | 0.455 |
+| MiniLM 128 tokens, vectors only | 0.460 | 0.333 | 0.500 | 0.374 |
+| **potion-base-8M, vectors only** | 0.440 | 0.343 | 0.520 | 0.414 |
+| static-retrieval-mrl, vectors only | 0.350 | 0.293 | 0.420 | 0.374 |
+| potion-retrieval-32M, vectors only | 0.340 | 0.263 | 0.390 | 0.354 |
+| BM25 + MiniLM 256 (hybrid) | 0.720 | 0.636 | 0.800 | 0.778 |
+| BM25 + potion-base-8M (hybrid) | 0.760 | 0.596 | 0.840 | 0.737 |
+
+**Hybrid weights** (BM25 + MiniLM, vector list weighted down):
+
+| Vector weight | MiniLM 128: docs @5 | code @5 | MiniLM 256: docs @5 | code @5 |
+|---|---|---|---|---|
+| 1 (equal) | 0.700 | 0.576 | 0.720 | 0.636 |
+| 0.5 | 0.740 | 0.636 | 0.740 | 0.707 |
+| 0.3 | 0.820 | 0.687 | 0.800 | 0.737 |
+| 0.5, vectors of the documentation only (`.md` / `.txt`) | 0.820 | 0.747 | 0.830 | 0.707 |
+
+- **With whole chunks, no vector model beats BM25, alone or fused** (fixed by the tuning below). Every fusion lowers recall@5: the vector list brings chunks that do not answer the question into the top 5, and the lower its weight, the less harm it does, but it never adds.
+- **Why:** these models are trained on short general English sentences, while the chunks are long pieces of code and technical documentation (a transformer only reads their first 128–256 tokens). The BM25 here is already tuned for this corpus (snake_case terms, file paths, query stopwords), so it leaves little for paraphrase matching to fix. Other projects reporting gains from hybrid retrieval started from a weaker BM25 (~0.82 / 0.55).
+- **Model chosen: `minishlab/potion-base-8M`.** It retrieves about as well as MiniLM cut to 128 tokens (0.44 / 0.343 against 0.46 / 0.333), but embeds the whole corpus in ~2 s instead of ~6 min, so the vector index is built inside `index`, far below the 5-minute limit. Loaded directly by `sentence-transformers`, 30 MB. Being this fast, it can be tuned cheaply: every variant below takes seconds to measure.
+- The retrieval-tuned static models (`static-retrieval-mrl`, `potion-retrieval-32M`) did worse than the general one on these chunks; FastText (averaged word vectors, not trained for search, ~7 GB pre-trained English model) was not tried for the same reasons.
+
+### Semantic embeddings: tuning `potion-base-8M` (2026-10-05)
+
+A static model represents a text by the **average** of its token vectors: over a 2000-character chunk, the few words that answer a question are diluted. Three changes were measured, on their own and together:
+
+- **Windows:** each chunk is split into windows of ~400 characters (whole lines, accumulated until the next line would pass 400), every window gets its own vector, and a chunk scores as its **best** window (max-pooling). 59,778 vectors instead of 12,907.
+- **File path:** the words of the chunk's file path (`vllm model executor layers quantization bitsandbytes py`) are prepended to every window, as they were added to the BM25 terms.
+- **Query stopwords:** the query is embedded without the BM25 stopwords (`what`, `how`, `the`…).
+
+**Vectors only:**
+
+| Path | Windows | Query stopwords removed | Vectors | Embedding time | docs @5 | docs @10 | code @5 | code @10 |
+|---|---|---|---|---|---|---|---|---|
+| no | no | no | 12,907 | 2 s | 0.440 | 0.520 | 0.343 | 0.414 |
+| no | no | yes | 12,907 | 2 s | 0.410 | 0.520 | 0.313 | 0.424 |
+| no | yes | no | 59,778 | 3 s | 0.700 | 0.730 | 0.323 | 0.424 |
+| no | yes | yes | 59,778 | 3 s | 0.660 | 0.730 | 0.394 | 0.485 |
+| yes | no | no | 12,907 | 2 s | 0.460 | 0.550 | 0.404 | 0.475 |
+| yes | no | yes | 12,907 | 2 s | 0.460 | 0.530 | 0.364 | 0.485 |
+| **yes** | **yes** | **no** | **59,778** | **3 s** | **0.730** | **0.790** | **0.596** | **0.677** |
+| yes | yes | yes | 59,778 | 3 s | 0.720 | 0.790 | 0.576 | 0.636 |
+
+Windows and path together take the vectors from 0.44 / 0.343 to **0.73 / 0.596**; each helps most where the other does not (windows on the docs, the path on the code).
+
+**Combining with BM25.** Two ways, with windows + path vectors (query stopwords removed in this first sweep):
+
+| Method | Parameter | docs @5 | docs @10 | code @5 | code @10 |
+|---|---|---|---|---|---|
+| BM25 alone | — | 0.870 | 0.920 | 0.758 | 0.818 |
+| Reciprocal rank fusion of both lists | vector weight 1.0 | 0.850 | 0.880 | 0.707 | 0.828 |
+| | 0.5 | 0.880 | 0.880 | 0.737 | 0.818 |
+| | 0.3 | 0.880 | 0.920 | 0.727 | 0.838 |
+| | 0.2 | 0.890 | 0.920 | 0.747 | 0.828 |
+| | 0.1 | 0.900 | 0.920 | 0.758 | 0.818 |
+| **Re-ranking** the BM25 top 20 | α = 0.1 | 0.870 | 0.920 | 0.758 | 0.818 |
+| | 0.2 | 0.870 | 0.920 | 0.768 | 0.828 |
+| | 0.3 | 0.890 | 0.920 | 0.778 | 0.828 |
+| | 0.5 | 0.900 | 0.920 | 0.798 | 0.859 |
+
+**Re-ranking:** BM25 picks the top N candidates, then each gets `(1 − α) × BM25 score / best BM25 score + α × vector similarity` and they are sorted again. The vectors only **reorder** chunks BM25 already found relevant, so they cannot bring unrelated chunks into the top 5, which is what made the list fusion lose.
+
+**Full sweep of the re-ranking**, recall@5 as `docs / code` (BM25 alone: 0.870 / 0.758):
+
+Query embedded as written:
+
+| Candidates N \ α | 0.3 | 0.4 | 0.5 | 0.6 | 0.7 | 0.8 |
+|---|---|---|---|---|---|---|
+| 10 | 0.920 / 0.788 | 0.920 / 0.798 | 0.920 / 0.798 | 0.920 / 0.778 | 0.910 / 0.788 | 0.910 / 0.778 |
+| 20 | 0.910 / 0.788 | 0.910 / 0.808 | 0.910 / 0.818 | 0.910 / 0.798 | 0.910 / 0.808 | 0.910 / 0.778 |
+| **30** | 0.910 / 0.798 | 0.910 / 0.818 | **0.910 / 0.828** | 0.910 / 0.808 | 0.910 / 0.818 | 0.910 / 0.778 |
+| 50 | 0.910 / 0.798 | 0.910 / 0.818 | 0.910 / 0.828 | 0.910 / 0.808 | 0.910 / 0.818 | 0.910 / 0.778 |
+
+Query without stopwords:
+
+| Candidates N \ α | 0.3 | 0.4 | 0.5 | 0.6 | 0.7 | 0.8 |
+|---|---|---|---|---|---|---|
+| 10 | 0.890 / 0.768 | 0.910 / 0.778 | 0.910 / 0.788 | 0.910 / 0.788 | 0.900 / 0.788 | 0.900 / 0.758 |
+| 20 | 0.890 / 0.778 | 0.900 / 0.788 | 0.900 / 0.798 | 0.890 / 0.798 | 0.890 / 0.808 | 0.870 / 0.768 |
+| 30 | 0.890 / 0.778 | 0.900 / 0.788 | 0.900 / 0.808 | 0.890 / 0.808 | 0.890 / 0.818 | 0.870 / 0.778 |
+| 50 | 0.890 / 0.778 | 0.900 / 0.788 | 0.900 / 0.808 | 0.890 / 0.808 | 0.890 / 0.818 | 0.860 / 0.768 |
+
+**Chosen configuration:** windows + path, query as written, re-ranking of the BM25 top **30** with **α = 0.5**:
+
+| Retrieval | docs @5 | docs @10 | code @5 | code @10 |
+|---|---|---|---|---|
+| BM25 | 0.870 | 0.920 | 0.758 | 0.818 |
+| **BM25 + vector re-ranking** | **0.910** | **0.920** | **0.828** | **0.859** |
+
+- **+4 points on docs and +7 on code** at recall@5, for ~3 s more indexing and milliseconds per query.
+- **Not a lucky cell:** every configuration with 20–50 candidates and α between 0.3 and 0.7 beats BM25 (docs 0.89–0.92, code 0.78–0.83). The chosen one is the middle of that plateau, not its best cell.
+- **Removing the query stopwords hurts the vectors** (1–2 points), the opposite of BM25: the question words carry part of its meaning for an embedding, while for BM25 they only add noise.
+- **Caveat:** the parameters were tuned on the same public datasets they are measured on. The plateau makes overfitting unlikely, but the private datasets of the defense may show a smaller gain.
+
 ### Generation (2026-10-03)
 
 **Speed.** Qwen3-0.6B is stored in `bfloat16`, and transformers loads it in that type by default. This CPU has no native bfloat16, so it is emulated:
@@ -611,7 +788,38 @@ The oracle test separates retrieval failures from generation failures. With the 
 | Marlin MOE architectures | ✅ `8.0;8.7;9.0+PTX` | ❌ **refuses** |
 | How to load a LoRA adapter | ✅ | ❌ **refuses** |
 
-The rule fixes out-of-domain questions, but makes the model refuse valid ones: a longer reminder dilutes "quote the exact values", and questions that do not name vLLM ("How do I load a LoRA adapter?") look off-topic. A refused valid question is worse than a wrong answer to an out-of-domain one, so this trade-off is still open (next options: a shorter wording, or skipping the model when the best BM25 score is very low). The other remaining failures (choosing the wrong list among similar chunks) are the "known reasoning limits" of a 0.6B model mentioned in the subject.
+The rule fixes out-of-domain questions, but makes the model refuse valid ones: a longer reminder dilutes "quote the exact values", and questions that do not name vLLM ("How do I load a LoRA adapter?") look off-topic. **The rule was dropped.**
+
+**Answer battery.** From here every change was measured on 10 fixed questions (`make test_answer`: 8 from the public datasets, 1 off-topic, 1 trap), scored ✅ 2, 🟡 1, refusal 0, ❌ −1 (wrong and confident):
+
+| Prompt | Score | Confident wrong answers |
+|---|---|---|
+| Short prompt, with the off-topic rule | 8 / 20 (4 valid questions refused) | 1 |
+| Short prompt, no off-topic rule | 7 | 4 |
+| + two few-shot examples (one answered, one refused) | 11 | 1 |
+| + reminder *"Answer the question using the context above."* instead of *"Answer with the exact values from the context."* (the old wording leaked into the answers: *"The exact values are: …"*) | 16 | **0** |
+| + context budget 2200 tokens instead of 2500 | **17** | **0** |
+
+- **Teaching by example instead of a rule:** the refused example made "capital of France" a refusal without refusing valid questions.
+- **Sampling** (the model card's values) instead of greedy: more valid questions refused (4 → 6) in the same battery; greedy kept, also because it is reproducible.
+- **Context budget** (1500, 2000, 2200, 2500, 2800, 3500 tokens): answers only change when the **number of chunks** that fit changes; more chunks distract the model, fewer drop useful ones. 2200 was the only budget where both the LoRA and the security questions were right, and it gave the best battery score.
+- **Thinking mode** (`enable_thinking=True`, tried with a temporary flag): 3–7× slower (65–150 s per answer) and, with the right chunk in the context, still picked the wrong list for the Mixtral question. Discarded.
+
+**Whole docs dataset.** The 100 public docs questions, judged by hand against the reference answers (`make test_answer_dataset`):
+
+| Result | First run | After two fixes |
+|---|---|---|
+| ✅ correct | 50 | **58** |
+| 🟡 partial | 19 | 18 |
+| refusal | 20 | **11** |
+| ❌ wrong | 11 | 13 |
+| Score | 108 / 200 | **121 / 200** |
+
+- The right chunk reached the model in **89 / 100** questions: most of the remaining loss is in generation, not retrieval.
+- **Fix 1:** the few-shot example answer ended with `(ServerConfig)` and the model copied it into 4 real answers; the example now has no parenthetical.
+- **Fix 2:** 6 answers were right but ended with the refusal sentence; `Generator._clean_answer` removes it.
+- Side effect: the new example answer made the model refuse less (20 → 11), with mostly right answers and two new confident mistakes.
+- The remaining failures (choosing the wrong list among similar chunks, a source whose own error message contradicts its code) are the "known reasoning limits" of a 0.6B model mentioned in the subject.
 
 ### Robustness and performance: how to test it yourself
 
@@ -670,12 +878,18 @@ What was tried to make the system faster and harder to break, with its measured 
 | Memory check before loading | Out of memory → `Killed`, nothing to catch | float32, bfloat16 or a clean error, from the available memory | ✅ |
 | `--dtype` with a closed list (`Literal`) | Any text was accepted | `float16` → clean argument error, values shown in `--help` | ✅ |
 | Shorter prompt asking for exact values | Evasive answers with the right context | Fixed the Marlin question, no regression | ✅ |
-| Off-topic rule in the reminder | "Paris" answered from the model's own knowledge | Refuses out-of-domain questions, but also some valid ones | ⚠️ open |
+| Off-topic rule in the reminder | "Paris" answered from the model's own knowledge | Refuses out-of-domain questions, but also some valid ones | ❌ replaced by a few-shot refusal example |
 | Bugs found by running the tests above | — | `"MemAvaiable"` typo (never read the memory) and `dtype` passed positionally (`TypeError`: the model never loaded) | ✅ fixed |
+| Cache-first model loading (`local_files_only`) | `from_pretrained` asks the Hugging Face Hub for updates on every run; one request never answered and a run hung for minutes | No network request when the model is cached; works offline (checked with no network at all); a failed first download is a clean error | ✅ |
+| Source paths checked in `answer_dataset` | A search results JSON could point at `/etc/passwd` or `../../.ssh/id_rsa`, which would go into the prompt | Every path is normalised and must stay inside the project; checked before PyTorch is loaded | ✅ |
+| Paths normalised without following symbolic links | A `data/raw` linked to another disk (`goinfre` on 42 computers) was rejected as "outside the project" | Linked corpus accepted, stored paths keep the `data/raw/...` form, `--raw_dir ../` still rejected | ✅ |
+| No model for empty inputs | `answer` with no matching source, `answer_dataset` with no question | The model is not loaded: fixed message or empty output | ✅ |
+| Static embedding model (Model2Vec `potion-base-8M`) instead of MiniLM | MiniLM needs ~6 min on this PC (~20 min on campus) to embed the corpus | ~2 s, about the same recall as MiniLM at 128 tokens; see *Semantic embeddings* | ✅ |
+| Windows + file path for the vectors, re-ranking of the BM25 top 30 | Averaged vectors of whole chunks lowered recall when fused with BM25 | Recall@5 docs 0.870 → 0.910, code 0.758 → 0.828; ~3 s more indexing | ✅ (to implement) |
 
 ### Tests
 
-`make test` runs **1,030 tests** in ~30 s (the memory-safe loading is tested end to end as described above, not yet in the suite):
+`make test` runs **1,049 tests** in ~20 s, without loading the model (the memory-safe loading and the answers are checked end to end as described above):
 
 - **Chunkers:**
   - invariants (exact offsets, no gaps or overlaps, never above the maximum, always progresses) on random texts and on the whole real corpus;
@@ -689,6 +903,8 @@ What was tried to make the system faster and harder to break, with its measured 
   - query stopwords.
 - **Evaluator:** IoU, cutoffs, missing and unknown questions, validation errors, the same numbers as the moulinette.
 - **CLI:** every command, argument validation and error messages, unknown or private options, exit codes, `--help`.
+- **Paths:** corpus folders outside the project rejected, symbolic links accepted, source paths of `answer_dataset` checked (absolute paths and `..`).
+- **Generator** (without the model): the refusal clean-up and the few-shot example.
 - **Mini datasets** in `tests/data`: a small vLLM-like corpus with easy and hard questions, also run end to end by `make test_rag`.
 
 ## Design decisions
@@ -706,7 +922,11 @@ What was tried to make the system faster and harder to break, with its measured 
   - the question after the context, where a small model attends most;
   - the key rule repeated right before the answer;
   - a fixed refusal sentence, easy to detect;
+  - few-shot examples instead of extra rules: a 0.6B model follows an example better than an instruction;
   - greedy decoding, so answers are reproducible.
+- **A fixed answer battery for every prompt change**, scored by hand, then the whole docs dataset: prompt choices are measured like retrieval choices.
+- **No network at run time:** the model is loaded from the local cache; the Hub is only used for the first download.
+- **Never trust paths that come from a file:** the source paths of a results JSON are checked against the project root before anything is read.
 - **100 % object-oriented**, pydantic models for every exchanged structure, `flake8` + `mypy` clean, and a single error hierarchy so that every expected failure ends with a message and an exit code instead of a traceback.
 
 ## Challenges faced
@@ -725,7 +945,9 @@ What was tried to make the system faster and harder to break, with its measured 
 - **Slow generation.** 30–40 s per answer, until profiling showed that bfloat16 is emulated on this CPU. Switched to float32.
 - **Running out of memory cannot be caught.** The kernel kills the process without a Python exception. Solved by checking the available memory first: float32, bfloat16 or a clean error, depending on what fits.
 - **Evasive answers with a correct context.** Diagnosed with the oracle test (only the correct chunk) and solved with a shorter prompt that asks for the exact values.
-- **Refusing out-of-domain questions without refusing valid ones.** The 0.6B model answers "Paris" from its own knowledge despite the rules. An explicit off-topic rule fixes it, but also makes it refuse some valid questions: still being tuned.
+- **Refusing out-of-domain questions without refusing valid ones.** The 0.6B model answered "Paris" from its own knowledge despite the rules. An explicit off-topic rule fixed it but also made it refuse valid questions. Solved with a few-shot refusal example instead of the rule (battery score 7 → 17, no confident wrong answer).
+- **The prompt leaking into the answers.** The reminder *"Answer with the exact values"* came back as *"The exact values are: …"*, and the example's `(ServerConfig)` was copied into real answers. Found by reading the outputs, fixed by rewording the reminder and the example.
+- **A run that hung with no error.** The process was asleep on an HTTPS connection to the Hugging Face Hub that never answered (seen with `ss`). Solved by loading from the local cache first.
 
 ## Resources
 
@@ -744,7 +966,7 @@ What was tried to make the system faster and harder to break, with its measured 
 
 An AI assistant was used throughout the project, as a tutor, a reviewer and a pair programmer:
 
-- **Learning.** Explanations of the subject, RAG, BM25, tokenization, embeddings, PyTorch and transformers, with exercises solved step by step. These notes are kept in `guia/`.
+- **Learning.** Explanations of the subject, RAG, BM25, tokenization, embeddings, PyTorch and transformers, with exercises solved step by step (personal notes, not part of the repository).
 - **Review.** Reviews of my code (bugs found in the reader, the index, the evaluator and the CLI), of my design choices and of the Fire edge cases.
 - **Code, on request:**
   - the CLI hardening (`CliCommand.validated`);

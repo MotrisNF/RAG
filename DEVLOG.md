@@ -571,6 +571,16 @@ Patterns found:
 
 **Network hang** — question 77 stayed asleep for minutes on an open HTTPS connection to Hugging Face (`ss` showed `ESTAB … :443`, 3 % CPU): `from_pretrained` asks the Hub for updates on every run, even with the model cached, and that request never answered. Fix: `Generator._from_pretrained` loads the model and the tokenizer with `local_files_only=True` first (no network request at all) and only downloads when they are not cached; a failed download is a clean `RagError`. Checked with no network at all (`unshare -rn`): `answer` works. The 24 questions after the fix ran without any hang.
 
+## Step 20 — Mandatory part closed (2026-10-05)
+
+**What**
+- `answer` prints a `StudentSearchResultsAndAnswer` JSON; no model when no source matches. `answer_dataset` implemented: re-reads each source, loads the model once, tqdm.
+- **Source paths of `answer_dataset` checked** (`CorpusReader.project_path`): a results JSON with `/etc/passwd` or `../../.ssh/id_rsa` is rejected **before PyTorch is loaded** (checked: 0.1 s, exit 1). Before, `PROJECT_ROOT / "/etc/passwd"` was simply `/etc/passwd`.
+- **Symlinked corpus accepted:** `CorpusReader` normalises paths with `os.path.abspath` instead of `resolve()`, so `..` is still removed (`--raw_dir ../` rejected) but links are not followed. A `data/raw` linked outside the project (as on `goinfre`) is read and its paths keep the `data/raw/...` form (checked with a real link).
+- `answer_dataset` with no questions writes an empty output without loading the model.
+- Outdated tests fixed: `test_accepted` loaded Qwen for `answer` (it used the real index) and expected `NotImplementedError` from `answer_dataset`; `TestPendingCommands` removed (no pending command). Suite: 1,049 tests in ~20 s (was ~30 s, the model is never loaded now).
+- README brought up to date (status, `answer` JSON example, `answer_dataset`, new Makefile rules, final prompt strategy, battery and docs-dataset results, robustness table).
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
@@ -613,12 +623,16 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 
 ## Next steps
 
+
+
 **Housekeeping**
 - [x] Docstrings on every module, class and function (`src/` and `tests/`).
 - [ ] Real `README.md` (English, subject sections: Description, Instructions, Resources + AI use, System architecture, Chunking strategy, Retrieval method, Performance analysis, Design decisions, Challenges faced, Example usage). Current one is a personal reminder + commands + performance data.
 - [ ] Keep TODOs here (they can be ticked), not only in commit messages.
 
 **Reader follow-ups**
+
+**Important**
 - [ ] Symlinked corpus: `resolve()` follows symlinks, so if `data/raw` is a symlink (e.g. to `goinfre` on campus) the resolved folder is outside `PROJECT_ROOT` and `read()` rejects it — stricter than the subject. Fix: normalise with `os.path.abspath` (removes `..`, does not follow symlinks) instead of `resolve()` for the corpus folder and the file paths. `../` must still be rejected. Add a test with a symlinked `data/raw`.
 - [x] Windows line endings — investigated, **no change**. `read_text` turns `\r\n` into `\n` (4 corpus files have `\r\n`, none is a source in the public datasets). The moulinette does not read the files: it only compares our numbers with the dataset's numbers, so what matters is how the dataset authors read them, and Python's default (`open`/`read_text`) is the most likely. Worst shift is 76 characters in a 3,520-character test file, 3 in the only one under `vllm/`: far inside the IoU 0.05 tolerance.
 
@@ -642,8 +656,8 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [x] Tokenizer: dotted names kept whole — measured, **removed** (no gain, more terms).
 - [x] Tokenizer: keep whole `snake_case` identifiers too (second pass).
 - [x] File path in the indexed text (enabled, measured).
-- [ ] Section headings / function names in the indexed text (after the structural chunkers).
-- [ ] Save which tokenizer built the index (in `IndexData`) and check it on `load`: a mismatch gives wrong results with no error.
+- [x] Section headings / function names in the indexed text (after the structural chunkers).
+- [x] Save which tokenizer built the index (in `IndexData`) and check it on `load`: a mismatch gives wrong results with no error.
 - [ ] Try excluding `tests/`, `benchmarks/` (dataset code sources are all under `vllm/`).
 - [x] Try chunk sizes, overlap, `K1`/`B`; record every result in README → Performance.
 - [x] Query stopwords (`tokenize_query`).
@@ -654,13 +668,13 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [x] `Generator` class in its own module, imported **only** inside `answer` / `answer_dataset` (the other commands must not load torch). Chat template without thinking, token budget, max new tokens, clean output.
 - [ ] `answer`: JSON output (`MinimalAnswer` in `StudentSearchResultsAndAnswer`), no-hits case, `index_dir` in the docstring.
 - [ ] `answer_dataset` (reads results with `_open_file_save`, re-reads the source texts, one `Generator`, tqdm). Maybe save every N questions, so a crash does not lose everything.
-- [ ] Off-topic rule in `REMINDER`: refuses valid questions (Marlin, LoRA). Decide: shorter wording, drop it, or skip the model when the best BM25 score is very low.
+- [x] Off-topic rule in `REMINDER`: refuses valid questions (Marlin, LoRA). Decide: shorter wording, drop it, or skip the model when the best BM25 score is very low.
 
 **Memory-safe model loading — implemented 2026-10-03** (`Generator._get_available_ram`, `_choose_dtype`). Bugs found by testing: `"MemAvaiable:"` typo (always `None` → always bfloat16) and `dtype` passed positionally (`TypeError` in `Qwen3ForCausalLM.__init__`, so `answer` was broken). Verified with the real CLI: 9.4 GB → float32 (19 s, 5.0 GB peak); no meminfo → bfloat16 (42 s, 2.6 GB); 2 GB → clean error, exit 1, model not loaded. Pending: unit tests and docstrings (the `--dtype` flag and the English of the messages are done).
 
 **Memory-safe model loading** (with too little RAM the kernel kills the process: `Killed`, exit 137, no Python exception, nothing to catch)
-- [ ] Measured peaks (`/usr/bin/time -f %M`): `answer` in **float32 ~5.1 GB**, in **bfloat16 ~3.0 GB** (both include the index and the bf16 → fp32 conversion while loading); `search` alone ~0.45 GB.
-- [ ] Read the available memory **before** loading the model. Nothing to install or import from a library and no sudo: `/proc/meminfo` is a plain text file readable by every user (`-r--r--r-- root`), read with `pathlib`, already imported in the project:
+- [x] Measured peaks (`/usr/bin/time -f %M`): `answer` in **float32 ~5.1 GB**, in **bfloat16 ~3.0 GB** (both include the index and the bf16 → fp32 conversion while loading); `search` alone ~0.45 GB.
+- [x] Read the available memory **before** loading the model. Nothing to install or import from a library and no sudo: `/proc/meminfo` is a plain text file readable by every user (`-r--r--r-- root`), read with `pathlib`, already imported in the project:
   ```python
   from pathlib import Path
 
@@ -671,11 +685,11 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
       raise ...                                        # line missing
   ```
   (OOP: as a method of a class, e.g. a static method of `Generator` or a small `MemoryCheck` class.)
-- [ ] Choose the dtype automatically: float32 if `available ≥ 5.5 GB`, else bfloat16 if `available ≥ 3.4 GB`, else a clean `RagError` (message + exit 1, no attempt to load). Thresholds = measured peak + ~0.4 GB margin (other programs can take memory while loading), as class constants (`FLOAT32_MIN_GB`, `BFLOAT16_MIN_GB`) with that explanation. Measured with `MAX_CONTEXT_TOKENS = 2500`: re-measure if the budget grows a lot. `answer_dataset` does not load the index (~0.45 GB less), so the same thresholds are conservative there.
-- [ ] `/proc/meminfo` only exists on Linux: catch `FileNotFoundError` / `OSError` and fall back to the conservative choice (bfloat16).
+- [x] Choose the dtype automatically: float32 if `available ≥ 5.5 GB`, else bfloat16 if `available ≥ 3.4 GB`, else a clean `RagError` (message + exit 1, no attempt to load). Thresholds = measured peak + ~0.4 GB margin (other programs can take memory while loading), as class constants (`FLOAT32_MIN_GB`, `BFLOAT16_MIN_GB`) with that explanation. Measured with `MAX_CONTEXT_TOKENS = 2500`: re-measure if the budget grows a lot. `answer_dataset` does not load the index (~0.45 GB less), so the same thresholds are conservative there.
+- [x] `/proc/meminfo` only exists on Linux: catch `FileNotFoundError` / `OSError` and fall back to the conservative choice (bfloat16).
 - [ ] Flag on `answer` (and `answer_dataset`) to force the dtype, **for testing only**. If the forced dtype does not fit, do not refuse, but print a warning to stderr (`float32 needs ~5 GB, only 2.1 GB available`).
-- [ ] Tests: the choice logic with fake values (no model loaded), the missing-file fallback, the error when nothing fits.
-- [ ] README: Requirements (automatic choice, thresholds) and Design decisions.
+- [x] Tests: the choice logic with fake values (no model loaded), the missing-file fallback, the error when nothing fits.
+- [x] README: Requirements (automatic choice, thresholds) and Design decisions.
 
 **Bonus** (only once the mandatory part is perfect)
 - [ ] Semantic embeddings (`all-MiniLM-L6-v2`), hybrid retrieval (reciprocal rank fusion), incremental indexing, caching, local HTTP API.
