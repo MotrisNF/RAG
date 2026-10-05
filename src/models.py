@@ -251,3 +251,8 @@ class EvaluationInform:
     def failed(self) -> list[str]:
         """Ids of the questions not fully found within k results."""
         return self._failed
+
+
+class WindowChunk(BaseModel):
+    windows: list[str]
+    windows_count: int
