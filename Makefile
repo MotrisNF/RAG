@@ -6,11 +6,26 @@ ARGS ?=
 SHELL := /bin/bash
 export TIMEFORMAT := Time: %1Rs
 
+# On 42 computers the home is too small for torch and the model, so the
+# virtualenv, the uv cache and the Hugging Face cache go to sgoinfre (shared
+# by every computer of the campus). Exported for every rule, so `uv run`
+# also finds the venv there. Elsewhere (no sgoinfre) nothing changes.
+# Variables already set in the environment win. Other folder: STORE=/path
+STORE ?= $(if $(USER),$(wildcard /sgoinfre/students/$(USER)))
+ifneq ($(STORE),)
+export UV_PROJECT_ENVIRONMENT ?= $(STORE)/rag-venv
+export UV_CACHE_DIR           ?= $(STORE)/uv-cache
+export HF_HOME                ?= $(STORE)/hf
+# Hardlinks do not work on NFS.
+export UV_LINK_MODE           ?= copy
+endif
+
 all: install
 
 install:
 	@uv sync
 	@echo "Everything is up to date now."
+	@if [ -n "$(STORE)" ]; then echo "venv: $(UV_PROJECT_ENVIRONMENT)"; fi
 
 run:
 	@uv run -m src $(ARGS)

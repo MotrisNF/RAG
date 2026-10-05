@@ -1,3 +1,8 @@
+"""Answer generation with Qwen/Qwen3-0.6B from the retrieved chunks.
+
+Imported only by the ``answer`` commands, so the other commands never
+load torch.
+"""
 from pathlib import Path
 import sys
 from typing import Any
@@ -6,14 +11,43 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from .exceptions import RagError
-from .models import Chunk, DtypeMode
+from .models import NO_SOURCES, Chunk, DtypeMode
 
 
 class Generator:
+    """Generate an answer grounded in the retrieved chunks.
+
+    The model and its tokenizer are loaded once in ``__init__`` and
+    reused for every question.
+
+    Attributes:
+        MODEL_NAME: Hugging Face model used for generation.
+        MAX_CONTEXT_TOKENS: Token budget of the retrieved context; the
+            chunks that do not fit are left out.
+        MAX_NEW_TOKENS: Maximum length of a generated answer, in tokens.
+        REFUSAL: Sentence the model says when the context does not
+            contain the answer.
+        NO_SOURCES: Answer when retrieval found nothing; the model is not
+            run, since with no context it could only answer from its own
+            knowledge.
+        SYSTEM_PROMPT: Fixed rules of the system message.
+        REMINDER: Rule repeated after the question in each user message.
+        EXAMPLE_ANSWER_CONTEXT: Context of the answered few-shot example.
+        EXAMPLE_ANSWER_QUESTION: Question of the answered example.
+        EXAMPLE_ANSWER: Expected answer of the answered example.
+        EXAMPLE_REFUSAL_CONTEXT: Context of the refused few-shot example.
+        EXAMPLE_REFUSAL_QUESTION: Question of the refused example.
+        FLOAT32_MIN_GB: Available memory, in GB, needed to load the model
+            in float32.
+        BFLOAT16_MIN_GB: Available memory, in GB, needed to load the
+            model in bfloat16.
+    """
+
     MODEL_NAME: str = "Qwen/Qwen3-0.6B"
     MAX_CONTEXT_TOKENS: int = 2200
     MAX_NEW_TOKENS: int = 150
     REFUSAL: str = "The context does not contain the answer."
+    NO_SOURCES: str = NO_SOURCES
     SYSTEM_PROMPT: str = (
         "You answer questions about the vLLM codebase. Answer ONLY from "
         "the context. Quote the exact names and values written in the "
@@ -45,10 +79,21 @@ class Generator:
         "---\n"
     )
     EXAMPLE_REFUSAL_QUESTION: str = "Who wrote Don Quixote?"
-    FLOAT32_MIN_GB: float = 5.5
-    BFLOAT16_MIN_GB: float = 3.4
+    FLOAT32_MIN_GB: float = 3.5
+    BFLOAT16_MIN_GB: float = 2.0
 
     def __init__(self, dtype: DtypeMode = "auto") -> None:
+        """Load the model and its tokenizer.
+
+        Args:
+            dtype: ``auto`` chooses float32 or bfloat16 from the available
+                memory; ``float32`` or ``bfloat16`` force it (with a
+                warning if the memory looks too low).
+
+        Raises:
+            RagError: Not enough memory to load the model, or the model
+                is not cached and cannot be downloaded.
+        """
         selected = self._set_dtype_mode(dtype)
         try:
             self._model = self._from_pretrained(AutoModelForCausalLM,
@@ -83,8 +128,13 @@ class Generator:
             RagError: The files are not cached and cannot be downloaded.
         """
         try:
-            return loader.from_pretrained(self.MODEL_NAME,
-                                          local_files_only=True, **kwargs)
+            loaded = loader.from_pretrained(self.MODEL_NAME,
+                                            local_files_only=True, **kwargs)
+            # With the weights cached but not the tokenizer files,
+            # transformers 5 does not raise: it builds an empty tokenizer
+            # (1 token, no chat template). Download the files instead.
+            if getattr(loaded, "chat_template", True) is not None:
+                return loaded
         except OSError:
             pass
         try:
@@ -117,6 +167,20 @@ class Generator:
         return "allocate memory" in message
 
     def _set_dtype_mode(self, dtype: DtypeMode) -> torch.dtype:
+        """Turn the ``--dtype`` option into the torch type to load.
+
+        A forced type is used even with too little memory: only a
+        warning is printed. ``auto`` is decided by ``_choose_dtype``.
+
+        Args:
+            dtype: ``auto``, ``float32`` or ``bfloat16``.
+
+        Returns:
+            ``torch.float32`` or ``torch.bfloat16``.
+
+        Raises:
+            RagError: ``auto`` and not enough memory for either type.
+        """
         if dtype == "float32":
             gb = self._get_available_ram()
             if gb is None:
@@ -164,6 +228,11 @@ class Generator:
         return self._choose_dtype(self._get_available_ram())
 
     def _get_available_ram(self) -> float | None:
+        """Read the available memory from ``/proc/meminfo``.
+
+        Returns:
+            ``MemAvailable`` in GB, or None if it cannot be read.
+        """
         gb: float | None = None
         try:
             for line in Path(
@@ -177,6 +246,20 @@ class Generator:
         return gb
 
     def _choose_dtype(self, gb: float | None) -> torch.dtype:
+        """Choose the torch type for ``auto`` from the available memory.
+
+        float32 when it fits, bfloat16 (half the memory) otherwise, and
+        bfloat16 when the memory cannot be read.
+
+        Args:
+            gb: Available memory in GB, or None if unknown.
+
+        Returns:
+            ``torch.float32`` or ``torch.bfloat16``.
+
+        Raises:
+            RagError: Less than ``BFLOAT16_MIN_GB`` available.
+        """
         if gb is None:
             print("The available memory cannot be read. "
                   "Torch mode: bfloat16", file=sys.stderr)
@@ -192,6 +275,19 @@ class Generator:
                        f"{self.BFLOAT16_MIN_GB} GB needed")
 
     def _build_context(self, chunks: list[Chunk]) -> str:
+        """Join the chunks into the context text, within the token budget.
+
+        Each chunk is a block with a ``[CHUNK i]`` header, its file path,
+        its text and a ``---`` separator. Chunks are added best first and
+        the first one that would exceed ``MAX_CONTEXT_TOKENS`` stops the
+        loop, so the best chunks are always kept.
+
+        Args:
+            chunks: The retrieved chunks, best first.
+
+        Returns:
+            The context text; empty when there are no chunks.
+        """
         context: str = ""
         total_context: int = 0
 
@@ -263,6 +359,24 @@ class Generator:
                 f"{self.REMINDER}")
 
     def generate(self, question: str, chunks: list[Chunk]) -> str:
+        """Answer a question from the given chunks.
+
+        Builds the context and the chat messages, then generates
+        greedily (``do_sample=False``, so the same input always gives the
+        same answer) up to ``MAX_NEW_TOKENS``, with Qwen3's thinking mode
+        off.
+
+        Args:
+            question: The question to answer.
+            chunks: The retrieved chunks, best first.
+
+        Returns:
+            The answer, cleaned by ``_clean_answer``. ``NO_SOURCES`` when
+            there are no chunks, without running the model: with no
+            context it could only answer from its own knowledge.
+        """
+        if not chunks:
+            return self.NO_SOURCES
         context = self._build_context(chunks)
         messages = self._build_messages(question, context)
 

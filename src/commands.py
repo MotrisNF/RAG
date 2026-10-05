@@ -5,11 +5,13 @@ Every public method of ``RagCLI`` is a command:
 """
 import functools
 import inspect
+import sys
 from types import SimpleNamespace
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import (Annotated, Any, Callable, Literal, TypeVar, cast,
                     get_args, get_origin)
+import uuid
 
 from pydantic import (BaseModel, ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
@@ -20,9 +22,10 @@ from .chunker import MdChunker, PyChunker
 from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
                          PathError, RagError, ResultsEvaluationError)
 from .evaluator import Evaluator
-from .models import (DtypeMode, MinimalSearchResults, MinimalSource,
+from .models import (Chunk, DtypeMode, MinimalSearchResults, MinimalSource,
                      StudentSearchResults, RagDataset, UnansweredQuestion,
-                     EvaluationInform)
+                     EvaluationInform, MinimalAnswer,
+                     StudentSearchResultsAndAnswer, NO_SOURCES)
 from .reader import CorpusReader
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -125,7 +128,7 @@ class RagCLI:
     @CliCommand.validated
     def index(
             self,
-            max_chunk_size: Annotated[int, Field(gt=0)] = 2000,
+            max_chunk_size: Annotated[int, Field(gt=0, le=2000)] = 2000,
             raw_dir: Annotated[str, Field(min_length=1)] = "data/raw",
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
@@ -258,6 +261,49 @@ class RagCLI:
             retrieved_sources=sources,
         )
 
+    @staticmethod
+    def _load_chunks(sources: list[MinimalSource],
+                     files: dict[str, str]) -> list[Chunk]:
+        """Recover the text of each source, as the chunk the index stored.
+
+        The search results only keep where each chunk is, not its text,
+        and the generator needs the text. Each file is read once (like
+        CorpusReader, as UTF-8, from the project root its paths are
+        relative to) and kept in ``files``, so the questions
+        that share a file do not read it again; the chunk is the slice
+        ``[first_character_index:last_character_index]``, the same one
+        the chunker cut.
+
+        Args:
+            sources: The retrieved sources of one question, best first.
+            files: Cache ``file_path → text`` shared by every question;
+                filled with the files read here.
+
+        Returns:
+            One Chunk per source, in the same order.
+
+        Raises:
+            PathError: A source file cannot be read, or is not UTF-8 text.
+        """
+        chunks: list[Chunk] = []
+        for source in sources:
+            if source.file_path not in files:
+                try:
+                    files[source.file_path] = (
+                        CorpusReader.PROJECT_ROOT / source.file_path
+                    ).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as e:
+                    raise PathError(source.file_path, e) from e
+            text = files[source.file_path]
+            chunks.append(Chunk(
+                file_path=source.file_path,
+                first_character_index=source.first_character_index,
+                last_character_index=source.last_character_index,
+                text=text[source.first_character_index:
+                          source.last_character_index],
+            ))
+        return chunks
+
     @CliCommand.validated
     def search_dataset(
             self,
@@ -318,17 +364,39 @@ class RagCLI:
                 testing).
         """
 
-        try:
-            from .generator import Generator
-        except (ImportError, MemoryError, OSError) as e:
-            raise RagError(f"Cannot load PyTorch ({type(e).__name__}: {e}). "
-                           "Not enough memory, or the installation is broken: "
-                           "run 'uv sync'.") from e
+        # The index first: its errors show up before PyTorch is imported.
         bm25 = BM25Index.load(Path(index_dir))
         hits = bm25.search(query, k)
-        generator = Generator(dtype)
-        answer = generator.generate(query, [hit.chunk for hit in hits])
-        print(answer)
+        # No source found: nothing to ground an answer on, so neither
+        # PyTorch nor the model is loaded.
+        if hits:
+            try:
+                print("Loading PyTorch...", file=sys.stderr)
+                from .generator import Generator
+            except (ImportError, MemoryError, OSError) as e:
+                raise RagError(
+                    f"Cannot load PyTorch ({type(e).__name__}: {e}). "
+                    "Not enough memory, or the installation is broken: "
+                    "run 'uv sync'.") from e
+            print(f"Loading {Generator.MODEL_NAME}...", file=sys.stderr)
+            generator = Generator(dtype)
+            answer = generator.generate(query, [hit.chunk for hit in hits])
+        else:
+            answer = NO_SOURCES
+        answered: MinimalAnswer = MinimalAnswer(
+            question_id=str(uuid.uuid4()),
+            question=query,
+            retrieved_sources=[MinimalSource(
+                file_path=hit.chunk.file_path,
+                first_character_index=hit.chunk.first_character_index,
+                last_character_index=hit.chunk.last_character_index
+                ) for hit in hits],
+            answer=answer
+        )
+        print(
+            StudentSearchResultsAndAnswer(
+                search_results=[answered],
+                k=k).model_dump_json(indent=2))
 
     @CliCommand.validated
     def answer_dataset(
@@ -351,8 +419,50 @@ class RagCLI:
             dtype: How to load the model, as in ``answer``.
         """
 
-        from .generator import Generator
-        raise NotImplementedError("answer_dataset is not implemented yet")
+        # The input first: a broken file fails before PyTorch is imported.
+        results = self._open_file_save(student_search_results_path,
+                                       StudentSearchResults)
+        try:
+            print("Loading PyTorch...", file=sys.stderr)
+            from .generator import Generator
+        except (ImportError, MemoryError, OSError) as e:
+            raise RagError(f"Cannot load PyTorch ({type(e).__name__}: {e}). "
+                           "Not enough memory, or the installation is broken: "
+                           "run 'uv sync'.") from e
+
+        results_list: list[MinimalAnswer] = []
+        files: dict[str, str] = {}
+        print(f"Loading {Generator.MODEL_NAME}...", file=sys.stderr)
+        generator = Generator(dtype)
+        for question in tqdm(
+                        results.search_results,
+                        desc="Generating answers",
+                        unit="question"
+                        ):
+            answer = generator.generate(
+                question=question.question,
+                chunks=self._load_chunks(question.retrieved_sources, files)
+            )
+
+            results_list.append(
+                MinimalAnswer(
+                    question_id=question.question_id,
+                    question=question.question,
+                    retrieved_sources=question.retrieved_sources,
+                    answer=answer
+                )
+            )
+        output = StudentSearchResultsAndAnswer(
+            search_results=results_list,
+            k=results.k)
+        try:
+            Path(save_directory).mkdir(parents=True, exist_ok=True)
+            path = Path(save_directory) / student_search_results_path.name
+            path.write_text(output.model_dump_json(indent=2),
+                            encoding="utf-8")
+        except OSError as e:
+            raise PathError(save_directory, e) from e
+        print(f"File saved in '{path}'")
 
     @CliCommand.validated
     def evaluate(

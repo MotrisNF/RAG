@@ -12,6 +12,11 @@ from pydantic import BaseModel, Field, model_validator
 # in ``generator``, so the CLI can use it without importing torch.
 DtypeMode = Literal["auto", "float32", "bfloat16"]
 
+# Answer when retrieval finds no source: the model is not run, since with no
+# context it could only answer from its own knowledge. Here for the same
+# reason as ``DtypeMode``: ``answer`` uses it without importing torch.
+NO_SOURCES = "No relevant sources were found in the corpus."
+
 
 class MinimalSource(BaseModel):
     """A character range of a corpus file.

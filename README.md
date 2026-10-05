@@ -142,6 +142,166 @@ uv run -m src answer_dataset \
 
 Reads the output of `search_dataset` and writes a `StudentSearchResultsAndAnswer` JSON (in progress, see Status).
 
+### Every option, with and without `make`
+
+Each line below sets one option to show how it is written; the others keep their default. With `make`, the whole command goes inside `ARGS`. Use single quotes outside when the question has spaces, so the inner double quotes reach the program. Boolean flags such as `--show_failed` go **after** the paths (or use `--show_failed=True`). Otherwise Fire reads the next word as the flag's value.
+
+#### `index`
+
+| Option | Default | Description |
+|---|---|---|
+| `--max_chunk_size` | `2000` | Maximum characters per chunk |
+| `--raw_dir` | `data/raw` | Corpus to index |
+| `--index_dir` | `data/processed` | Where the index is saved |
+
+```bash
+uv run -m src index
+uv run -m src index --max_chunk_size 1000
+uv run -m src index --raw_dir data/raw
+uv run -m src index --index_dir data/processed
+uv run -m src index --max_chunk_size 2000 --raw_dir data/raw --index_dir data/processed
+
+make run ARGS="index"
+make run ARGS="index --max_chunk_size 1000"
+make run ARGS="index --raw_dir data/raw"
+make run ARGS="index --index_dir data/processed"
+make run ARGS="index --max_chunk_size 2000 --raw_dir data/raw --index_dir data/processed"
+```
+
+#### `search`
+
+| Option | Default | Description |
+|---|---|---|
+| `--query` (or positional) | required | The question |
+| `--k` | `10` | Number of sources returned |
+| `--index_dir` | `data/processed` | Index built by `index` |
+
+```bash
+uv run -m src search "How do I load a LoRA adapter?"
+uv run -m src search --query "How do I load a LoRA adapter?"
+uv run -m src search "How do I load a LoRA adapter?" --k 5
+uv run -m src search "How do I load a LoRA adapter?" --index_dir data/processed
+uv run -m src search --query "How do I load a LoRA adapter?" --k 5 --index_dir data/processed
+
+make run ARGS='search "How do I load a LoRA adapter?"'
+make run ARGS='search --query "How do I load a LoRA adapter?"'
+make run ARGS='search "How do I load a LoRA adapter?" --k 5'
+make run ARGS='search "How do I load a LoRA adapter?" --index_dir data/processed'
+make run ARGS='search --query "How do I load a LoRA adapter?" --k 5 --index_dir data/processed'
+```
+
+#### `search_dataset`
+
+| Option | Default | Description |
+|---|---|---|
+| `--dataset_path` | required | Dataset of questions (`UnansweredQuestions`) |
+| `--k` | `10` | Sources per question |
+| `--save_directory` | `data/output/search_results/UnansweredQuestions` | Where the results are written (same file name as the dataset) |
+| `--index_dir` | `data/processed` | Index built by `index` |
+
+```bash
+uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json
+uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_code_public.json --k 5
+uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --save_directory data/output/search_results/UnansweredQuestions
+uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --index_dir data/processed
+
+make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json"
+make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_code_public.json --k 5"
+make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --save_directory data/output/search_results/UnansweredQuestions"
+make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --index_dir data/processed"
+```
+
+#### `evaluate`
+
+| Option | Default | Description |
+|---|---|---|
+| `--student_search_results_path` | required | Output of `search_dataset` |
+| `--dataset_path` | required | Reference dataset (`AnsweredQuestions`) |
+| `--k` | `10` | Largest k for which recall is reported |
+| `--show_failed` | `False` | List the questions whose sources were not found |
+
+```bash
+uv run -m src evaluate \
+  --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json \
+  --dataset_path data/datasets/AnsweredQuestions/dataset_docs_public.json
+uv run -m src evaluate \
+  --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json \
+  --dataset_path data/datasets/AnsweredQuestions/dataset_docs_public.json --k 5
+uv run -m src evaluate \
+  --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_code_public.json \
+  --dataset_path data/datasets/AnsweredQuestions/dataset_code_public.json --show_failed
+
+make run ARGS="evaluate --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --dataset_path data/datasets/AnsweredQuestions/dataset_docs_public.json"
+make run ARGS="evaluate --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --dataset_path data/datasets/AnsweredQuestions/dataset_docs_public.json --k 5"
+make run ARGS="evaluate --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_code_public.json --dataset_path data/datasets/AnsweredQuestions/dataset_code_public.json --show_failed"
+```
+
+#### `answer`
+
+| Option | Default | Description |
+|---|---|---|
+| `--query` (or positional) | required | The question |
+| `--k` | `10` | Sources given to the model as context |
+| `--index_dir` | `data/processed` | Index built by `index` |
+| `--dtype` | `auto` | `auto` (chosen from free memory), `float32` or `bfloat16` (forced, no memory check) |
+
+```bash
+uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?"
+uv run -m src answer --query "What is the minimum version of bitsandbytes required for vLLM quantization?"
+uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --k 5
+uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --index_dir data/processed
+uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --dtype bfloat16
+
+make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?"'
+make run ARGS='answer --query "What is the minimum version of bitsandbytes required for vLLM quantization?"'
+make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --k 5'
+make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --index_dir data/processed'
+make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --dtype bfloat16'
+```
+
+#### `answer_dataset` (in progress)
+
+| Option | Default | Description |
+|---|---|---|
+| `--student_search_results_path` | required | Output of `search_dataset` |
+| `--save_directory` | `data/output/search_results_and_answer/UnansweredQuestions` | Where the answers are written |
+| `--dtype` | `auto` | As in `answer` |
+
+```bash
+uv run -m src answer_dataset --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json
+uv run -m src answer_dataset --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --save_directory data/output/search_results_and_answer/UnansweredQuestions
+uv run -m src answer_dataset --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --dtype float32
+
+make run ARGS="answer_dataset --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json"
+make run ARGS="answer_dataset --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --save_directory data/output/search_results_and_answer/UnansweredQuestions"
+make run ARGS="answer_dataset --student_search_results_path data/output/search_results/UnansweredQuestions/dataset_docs_public.json --dtype float32"
+```
+
+#### Pipeline rules
+
+`make test_rag` runs on the mini corpus in `tests/data`. It takes these variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `TEST_DATASET` | `dataset_mini.json` | Dataset in `tests/data/datasets/*/` |
+| `TEST_K` | `5` | k for `search_dataset` and `evaluate` |
+| `TEST_CHUNK` | `500` | `--max_chunk_size` for `index` |
+
+```bash
+make test_rag
+make test_rag TEST_DATASET=dataset_mini_hard.json
+make test_rag TEST_K=10
+make test_rag TEST_CHUNK=2000
+make test_rag TEST_DATASET=dataset_mini_hard.json TEST_CHUNK=2000 TEST_K=10
+```
+
+`make test_rag_base` runs on the real data with fixed values (k = 10, chunks of 2000, docs and code datasets). `make cleandata` removes the index and the generated JSON files.
+
+```bash
+make test_rag_base
+make cleandata
+```
+
 ## System architecture
 
 ```
