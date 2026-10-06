@@ -1,31 +1,30 @@
 # Pasos a seguir: bonus del proyecto RAG
 
-> **Para quien retome esto (otro agente o yo):** lee primero **"Dónde estamos ahora"** justo debajo y luego **"Contexto para quien retome esto"**. Lo que se está haciendo es el **bonus 4, fase 2** (al final del fichero). Bonus 1 y 2: hechos (pasos 0–9, se dejan como historia de cómo se hizo).
+> **Para quien retome esto (otro agente o yo):** lee primero **"Dónde estamos ahora"** justo debajo y luego **"Contexto para quien retome esto"**. Lo que se está haciendo es el **bonus 5 (API HTTP)**, paso 5.4 (al final del fichero). Bonus 1, 2 y 4: hechos (se dejan como historia de cómo se hizo).
 
-## Dónde estamos ahora (2026-10-06, final de la tarde, en el campus)
+## Dónde estamos ahora (2026-10-06, noche, en casa)
 
 | Parte | Estado |
 |---|---|
-| Parte obligatoria | ✅ completa (recall@5 con `bm25`: docs 0.870, code 0.758) |
+| Parte obligatoria | ✅ completa (recall@5 con `bm25`: docs 0.870, code 0.758); revisada contra el subject (38 entradas degeneradas sin traceback) |
 | Bonus 1 (embeddings) + 2 (híbrido) | ✅ por defecto `--retriever hybrid`: docs **0.910**, code **0.828** |
-| Bonus 4 (caché) | ✅ fases 0, 1 y 2 (`CachedRetriever` en disco, `--cache`). Fase 3 (caché de `answer`) opcional, sin decidir |
-| Bonus 5 (API HTTP) | **en curso**: decidido FastAPI + uvicorn; ahora 5.1 |
+| Bonus 4 (caché) | ✅ arranque en frío (`StaticEncoder`) + caché de búsquedas en disco (`--cache`, un fichero por retriever) |
+| Bonus 5 (API HTTP) | **en curso**: 5.1 ✅, 5.2 ✅ (probado con curl), **siguiente: 5.4 errores** (ver abajo), luego 5.3 `/answer` y 5.5 |
 | Bonus 3 (indexado incremental) | pendiente |
-| Cierre (`.gitignore`, repaso README, defensa) | pendiente |
+| Cierre (`.gitignore`, sacar de git PDF/DEVLOG/pasos/.vscode/`dataset_mini_3.json`, repaso, defensa) | pendiente |
 
-Estimación dada al usuario: lleva un **75–80 %** del proyecto (obligatoria ~65 % + bonus 1/2 ~10 % + mitad del bonus 4).
+Estimación dada al usuario: **~85 %** del proyecto.
 
-**Último commit:** `cefe27c` *Add the in-memory query cache and update docs (bonus 4)* (incluye 2.1 y el esqueleto de `QueryCache`). Después, sin commit (2026-10-06, en casa):
-- `README.md` reescrito (fusión de README + README2, al día; README2 borrado). Sin referencias a DEVLOG, `data/` ni ficheros de trabajo.
-- Arreglado en `HybridRetriever.search`: con `k > CANDIDATES` devolvía solo 30 → ahora `self._bm25.search(query, max(self.CANDIDATES, k))`. Pendiente: docstring ("Each of the CANDIDATES…") y un test con `k > CANDIDATES`.
-- Umbrales de memoria de `Generator` (3.5 / 2.0 GB): bajados **a propósito** para el campus. No es un error.
-- Modelos (potion y Qwen) siempre descargados de antemano en la máquina de la defensa: la descarga en `index` no es un riesgo.
+**Último commit:** `bbe3bfa` (caché en disco + `search`/`answer` guardan JSON + revisión del subject). Sin commit: bonus 5.1 y 5.2 (`src/api.py`, `serve` en `commands.py`, `fastapi`/`uvicorn`/`httpx` en `pyproject.toml` y `uv.lock`) y el test de `ArgvGuard` actualizado con `serve`.
 
-**Bonus 4 fase 2 terminada (2026-10-06, sin commit):** 2.2 (disco), 2.3 (CLI) y 2.4 (tests, medidas, README, DEVLOG Step 23). Un fichero de caché por retriever (`query_cache_{bm25,hybrid}.json`). Medido en casa: `search_dataset` docs 1.94 s → 0.32 s; `test_retrieval` 4.4 s → 0.7 s; recall idéntico. **1150 tests**, `make lint-strict` limpio. Siguiente: decidir fase 3 o pasar al bonus 5 (API HTTP).
-
-**Después (2026-10-06):** `search` y `answer` también guardan su JSON en `--save_directory` (por defecto `data/output/search_results/SingleQuestions` y `data/output/search_results_and_answer/SingleQuestions`) como `<question_id>.json`; el JSON sigue en stdout y "File saved in" va a stderr. `RagCLI._save_json` compartido por los cuatro comandos. `conftest.py` redirige las salidas relativas a `tmp_path` (los tests no ensucian `data/output`). Revisión contra el subject hecha: 38 entradas degeneradas sin traceback; `flake8 .` en el Makefile; pendiente de cierre: sacar de git `en.subject.pdf`, DEVLOG, `pasos_a_seguir.md`, `.vscode/` y `dataset_mini_3.json` (sin uso). 1151 tests.
-
-**Mensaje de commit propuesto:** *Add the on-disk query cache with --cache (bonus 4)*
+**Dónde lo dejó el usuario (bonus 5):**
+- `RagApi(retriever)` en `src/api.py` con `GET /health` y `GET /search` (reutiliza `RagCLI._search_question`, `flush()` tras cada búsqueda). `serve --host --port --index_dir --retriever --cache` en `RagCLI` crea el retriever con `_load_retriever` y llama a `uvicorn.run`. Probado: `/health`, `/search` da el mismo JSON que la CLI.
+- **Encontrado:** sin índice, `/search` da **500 con traceback** en el log (el `IndexNotFoundError` no se captura). Siguiente paso = **5.4**: `self.app.exception_handler(RagError)(self._rag_error)` → `JSONResponse(status_code=503, content={"detail": str(error)})`. Esqueleto ya explicado al usuario.
+- Segundo `serve` en un puerto ocupado: sin traceback, pero **exit 3** (código de uvicorn); el proyecto usa 1. Decidir en 5.4.
+- Pendiente probar: `?query=%20%20` (solo espacios) pasa con `Query(min_length=1)`; la CLI lo rechaza. Opción: `StringConstraints(strip_whitespace=True, min_length=1)`.
+- **Lint pendiente** (`make lint` falla): `src/api.py:37` W391 (línea en blanco al final) y `src/commands.py:783` E501 (`index_dir` de `serve`, 80 caracteres). Faltan docstrings de `api.py` y de `serve`, y `description="Placeholder"` en `FastAPI(...)`.
+- Explicado al usuario: HTTP (GET/POST, ruta, código de estado, cuerpo), FastAPI como "el Fire de HTTP", uvicorn, `self.app.get(ruta)(self.metodo)`, por qué `serve` está en `RagCLI` y no en `RagApi`.
+- `data/processed` se vació a las 21:18 (`make cleandata`, probablemente); regenerado con `index`.
 
 **Si se continúa en casa:** `data/processed` no está en git. Antes de medir nada hay que ejecutar `uv run -m src index` (crea `index.json`, `vectors.npy`, `owners.npy`, `embeddings.npy`, `tokenizer.json`; ~13 s en el campus, menos en casa). En el campus el entorno está en `/sgoinfre` (`UV_PROJECT_ENVIRONMENT=/sgoinfre/students/saperez-/rag-venv`, `HF_HOME=/sgoinfre/students/saperez-/hf`); en casa serán otros, no hace falta tocarlos.
 
@@ -588,22 +587,22 @@ Elegido por el usuario frente a `http.server` (librería estándar). Motivos:
 
 ## Pasos
 
-### 5.1 — Dependencias y esqueleto que arranca
-- [ ] `uv add fastapi uvicorn` y `uv add --dev httpx`.
-- [ ] `src/api.py`: `RagApi` con `GET /health` → `{"status": "ok"}`.
-- [ ] Comando `serve` en `RagCLI` (`uvicorn.run(api.app, host=..., port=...)`).
-- [ ] Prueba: `uv run -m src serve` + `curl http://127.0.0.1:8000/health`; `/docs` en el navegador.
+### 5.1 — Dependencias y esqueleto que arranca ✅
+- [x] `uv add fastapi uvicorn` y `uv add --dev httpx`.
+- [x] `src/api.py`: `RagApi` con `GET /health` → `{"status": "ok"}`.
+- [x] Comando `serve` en `RagCLI` (`uvicorn.run(api.app, host=..., port=...)`).
+- [x] Prueba: `uv run -m src serve` + `curl http://127.0.0.1:8000/health`; `/docs` en el navegador.
 
-### 5.2 — `GET /search`
-- [ ] Parámetros `query` (no vacía) y `k` (> 0) validados por FastAPI; reutilizar `RagCLI._search_question`. Respuesta: `StudentSearchResults`.
-- [ ] El retriever se crea al arrancar con `_load_retriever` (con caché, no carga nada hasta la primera pregunta nueva).
-- [ ] Cuándo llamar a `flush()`: decidir (tras cada búsqueda nueva o al apagar el servidor).
+### 5.2 — `GET /search` ✅ (falta docstrings y decidir solo-espacios)
+- [x] Parámetros `query` (no vacía) y `k` (> 0) validados por FastAPI; reutilizar `RagCLI._search_question`. Respuesta: `StudentSearchResults`.
+- [x] El retriever se crea al arrancar con `_load_retriever` (con caché, no carga nada hasta la primera pregunta nueva).
+- [x] `flush()` tras cada búsqueda (solo escribe si la pregunta era nueva).
 
 ### 5.3 — `POST /answer`
 - [ ] Cuerpo con `query` y `k`; respuesta `StudentSearchResultsAndAnswer`. Sin fuentes → `NO_SOURCES` sin cargar Qwen.
 - [ ] `Generator` cargado una vez, la primera vez que hace falta. FastAPI atiende las rutas síncronas en varios hilos: un `threading.Lock` alrededor de la generación (un solo modelo).
 
-### 5.4 — Errores
+### 5.4 — Errores (SIGUIENTE)
 - [ ] `RagError` → JSON `{"detail": "<mensaje>"}` con el código adecuado (índice que falta → 503, entrada mala → 400/422). Nunca un 500 con traceback.
 
 ### 5.5 — Tests, medidas y documentación

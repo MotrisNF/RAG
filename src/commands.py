@@ -775,3 +775,20 @@ class RagCLI:
                 continue
             parts.append(f"{name}:{stat.st_size}:{stat.st_mtime_ns}")
         return "|".join(parts)
+
+    @CliCommand.validated
+    def serve(self,
+              host: Annotated[str, Field(min_length=1)] = "127.0.0.1",
+              port: Annotated[int, Field(ge=1, le=65535)] = 8000,
+              index_dir: Annotated[
+                  str,
+                  Field(min_length=1)] = "data/processed",
+              retriever: RetrieverMode = "hybrid",
+              cache: bool = True
+              ) -> None:
+        import uvicorn
+        from .api import RagApi
+
+        api = RagApi(self._load_retriever(index_dir, retriever, cache))
+        print(f"http://{host}:{port}/docs", file=sys.stderr)
+        uvicorn.run(api.app, host=host, port=port)

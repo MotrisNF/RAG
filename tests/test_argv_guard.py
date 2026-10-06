@@ -401,10 +401,10 @@ class TestRagCLI:
     """The guard against the real CLI."""
 
     def test_commands(self) -> None:
-        """The six subject commands are detected."""
+        """The six subject commands and ``serve`` (bonus 5) are detected."""
         assert ArgvGuard(RagCLI)._commands() == {
             "index", "search", "search_dataset", "answer",
-            "answer_dataset", "evaluate",
+            "answer_dataset", "evaluate", "serve",
         }
 
     def test_uses_clean_signatures(self) -> None:
