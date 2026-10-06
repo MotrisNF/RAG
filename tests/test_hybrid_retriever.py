@@ -95,10 +95,20 @@ class TestCombination:
         assert [h.chunk_id for h in hits] == [2, 7]
 
     def test_asks_bm25_for_candidates(self) -> None:
-        """BM25 is asked for ``CANDIDATES`` hits, whatever ``k`` is."""
+        """BM25 is asked for ``CANDIDATES`` hits when ``k`` is smaller."""
         bm25, vectors = plan_example()
         HybridRetriever(bm25, vectors).search("q", 3)  # type: ignore
         assert bm25.asked == [HybridRetriever.CANDIDATES]
+
+    def test_large_k_gets_k_results(self,
+                                    indexes: tuple[BM25Index, VectorIndex],
+                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        """``k`` above ``CANDIDATES``: BM25 is asked for ``k`` hits, so
+        the search still returns ``k`` results (it stopped at 30)."""
+        bm25, vectors = indexes
+        monkeypatch.setattr(HybridRetriever, "CANDIDATES", 2)
+        hits = HybridRetriever(bm25, vectors).search("sampling cuda pip", 5)
+        assert len(hits) == len(bm25.search("sampling cuda pip", 5)) == 5
 
     def test_bm25_hits_untouched(self) -> None:
         """The BM25 hits keep their own scores (copies are returned)."""

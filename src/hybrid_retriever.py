@@ -49,7 +49,8 @@ class HybridRetriever(Retriever):
     def search(self, query: str, k: int) -> list[SearchHit]:
         """Return the ``k`` best chunks for the query.
 
-        Each of the ``CANDIDATES`` BM25 hits gets
+        BM25 gives ``CANDIDATES`` hits (or ``k`` when it is larger, so a
+        large ``k`` still gets ``k`` results), and each one gets
         ``(1 - ALPHA) * score / best score + ALPHA * similarity``: BM25 is
         divided by the best one so both parts go up to 1. Equal scores
         keep the BM25 order (the sort is stable).
@@ -65,7 +66,7 @@ class HybridRetriever(Retriever):
         Raises:
             RagError: The embedding model cannot be loaded.
         """
-        hits = self._bm25.search(query, self.CANDIDATES)
+        hits = self._bm25.search(query, max(self.CANDIDATES, k))
         if not hits:
             return []
         best = self._vector.chunk_score(query)

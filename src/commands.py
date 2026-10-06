@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from .base_retriever import Retriever
 from .bm25_index import BM25Index
+from .cached_retriever import CachedRetriever
 from .chunker import MdChunker, PyChunker
 from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
                          PathError, RagError, ResultsEvaluationError)
@@ -149,7 +150,8 @@ class RagCLI:
             raw_dir: Folder with the corpus to index. Relative paths are
                 resolved from the working directory.
             index_dir: Folder where the index is saved; created if needed.
-                A previous index there is replaced.
+                A previous index there is replaced, and its query cache
+                removed.
         """
         result = CorpusReader(raw_dir).read()
         characters = sum(len(doc.text) for doc in result.documents)
@@ -184,6 +186,14 @@ class RagCLI:
         # Same chunks in the same order: chunk ids must match BM25.
         vectors = VectorIndex.build(chunks)
         vectors.save(Path(index_dir))
+        # Results cached with the old index are never reused (the namespace
+        # changes), so remove the files instead of leaving them on disk.
+        for name in get_args(RetrieverMode):
+            cache_path = CachedRetriever.file_path(Path(index_dir), name)
+            try:
+                cache_path.unlink(missing_ok=True)
+            except OSError as e:
+                raise PathError(cache_path, e) from e
         print(f"Ingestion complete! Index saved under {index_dir}/")
 
     @CliCommand.validated
@@ -192,7 +202,8 @@ class RagCLI:
             query: Annotated[str, Field(min_length=1)],
             k: Annotated[int, Field(gt=0)] = 10,
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
-            retriever: RetrieverMode = "hybrid"
+            retriever: RetrieverMode = "hybrid",
+            cache: bool = True
             ) -> None:
         """Print the top-k sources for a single question, as JSON.
 
@@ -205,19 +216,23 @@ class RagCLI:
             index_dir: Folder where the index command saved the index.
             retriever: ``hybrid`` reranks the BM25 results with the vector
                 index (better recall); ``bm25`` uses the words only.
+            cache: Reuse the results of questions already searched with
+                the same index and retriever (``--cache=False`` to search
+                again).
         """
-        indexer = self._load_retriever(index_dir, retriever)
+        indexer = self._load_retriever(index_dir, retriever, cache)
         question = UnansweredQuestion(question=query)
         results = StudentSearchResults(
             search_results=[self._search_question(indexer, question, k)],
             k=k,
         )
+        indexer.flush()
         print(results.model_dump_json(indent=2))
 
     @staticmethod
-    def _load_retriever(index_dir: str,
-                        retriever: RetrieverMode
-                        ) -> Retriever:
+    def _build_retriever(index_dir: str,
+                         retriever: RetrieverMode
+                         ) -> Retriever:
         """Load the saved indexes the chosen retriever needs.
 
         Both retrievers have the same ``search(query, k)``, so the
@@ -241,6 +256,39 @@ class RagCLI:
         if retriever == "bm25":
             return bm25
         return HybridRetriever(bm25, VectorIndex.load(Path(index_dir)))
+
+    @staticmethod
+    def _load_retriever(index_dir: str,
+                        retriever: RetrieverMode,
+                        cache: bool
+                        ) -> Retriever:
+        """Give the commands the chosen retriever, cached or not.
+
+        With the cache, nothing is loaded here: the indexes are only
+        loaded by the first question that is not already cached, so a
+        command whose questions are all cached never loads them.
+
+        Args:
+            index_dir: Folder where the index command saved the indexes.
+            retriever: ``bm25`` or ``hybrid``.
+            cache: Wrap the retriever in a ``CachedRetriever`` that reads
+                and writes ``index_dir/query_cache_<retriever>.json``.
+
+        Returns:
+            The retriever, or a ``CachedRetriever`` around it.
+
+        Raises:
+            IndexNotFoundError, PathError, DatasetError, VectorIndexError:
+                Without the cache, as in ``_build_retriever``. With it,
+                the same errors come from the first uncached search.
+        """
+        if not cache:
+            return RagCLI._build_retriever(index_dir, retriever)
+        return CachedRetriever(
+            lambda: RagCLI._build_retriever(index_dir, retriever),
+            RagCLI._cache_namespace(index_dir, retriever),
+            CachedRetriever.file_path(Path(index_dir), retriever)
+        )
 
     @staticmethod
     def _open_file_save(path: Path, model: type[M]) -> M:
@@ -355,7 +403,8 @@ class RagCLI:
                 Field(min_length=1)
                 ] = "data/output/search_results/UnansweredQuestions",
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
-            retriever: RetrieverMode = "hybrid"
+            retriever: RetrieverMode = "hybrid",
+            cache: bool = True
             ) -> None:
         """Search every question of a dataset and save the results as JSON.
 
@@ -367,8 +416,11 @@ class RagCLI:
             index_dir: Folder where the index command saved the index.
             retriever: ``hybrid`` reranks the BM25 results with the vector
                 index (better recall); ``bm25`` uses the words only.
+            cache: Reuse the results of questions already searched with
+                the same index and retriever (``--cache=False`` to search
+                again).
         """
-        indexer = self._load_retriever(index_dir, retriever)
+        indexer = self._load_retriever(index_dir, retriever, cache)
         dataset = self._open_file_save(dataset_path, RagDataset)
 
         results_list: list[MinimalSearchResults] = []
@@ -378,6 +430,7 @@ class RagCLI:
                         unit="question"
                         ):
             results_list.append(self._search_question(indexer, question, k))
+        indexer.flush()
         output = StudentSearchResults(search_results=results_list, k=k)
         try:
             Path(save_directory).mkdir(parents=True, exist_ok=True)
@@ -395,7 +448,8 @@ class RagCLI:
             k: Annotated[int, Field(gt=0)] = 10,
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
             retriever: RetrieverMode = "hybrid",
-            dtype: DtypeMode = "auto"
+            dtype: DtypeMode = "auto",
+            cache: bool = True
             ) -> None:
         """Answer a single question using the retrieved sources as context.
 
@@ -409,11 +463,15 @@ class RagCLI:
                 bfloat16 from the available memory; ``float32`` or
                 ``bfloat16`` force it, without the memory check (for
                 testing).
+            cache: Reuse the results of questions already searched with
+                the same index and retriever (``--cache=False`` to search
+                again).
         """
 
         # The index first: its errors show up before PyTorch is imported.
-        indexer = self._load_retriever(index_dir, retriever)
+        indexer = self._load_retriever(index_dir, retriever, cache)
         hits = indexer.search(query, k)
+        indexer.flush()
         # No source found: nothing to ground an answer on, so neither
         # PyTorch nor the model is loaded.
         if hits:
@@ -641,3 +699,38 @@ class RagCLI:
         hidden = len(ids) - cls.MAX_IDS_SHOWN
         if hidden > 0:
             print(f"  ... and {hidden} more")
+
+    @staticmethod
+    def _cache_namespace(index_dir: str, retriever: RetrieverMode) -> str:
+        """Describe what produces the search results, for the query cache.
+
+        Cached results are only reused when this text is the same: the
+        retriever, its parameters, and the size and modification time of
+        the index files it reads (rebuilding the index changes them). The
+        files are not read, only their metadata, so it is instant.
+
+        Args:
+            index_dir: Folder where the index command saved the indexes.
+            retriever: ``bm25`` or ``hybrid``.
+
+        Returns:
+            The namespace, e.g. ``bm25|k1=1.9|b=0.5|index.json:...``. A
+            missing file is written as ``<name>:missing`` instead of
+            failing: loading the index reports it ("Run 'index' first").
+        """
+        parts = [retriever, f"k1={BM25Index.K1}", f"b={BM25Index.B}"]
+        files = [BM25Index.FILE_NAME]
+        if retriever == "hybrid":
+            parts += [f"candidates={HybridRetriever.CANDIDATES}",
+                      f"alpha={HybridRetriever.ALPHA}",
+                      f"model={VectorIndex.MODEL_NAME}"]
+            files.append(VectorIndex.VECTOR_NAME)
+
+        for name in files:
+            try:
+                stat = (Path(index_dir) / name).stat()
+            except OSError:
+                parts.append(f"{name}:missing")
+                continue
+            parts.append(f"{name}:{stat.st_size}:{stat.st_mtime_ns}")
+        return "|".join(parts)

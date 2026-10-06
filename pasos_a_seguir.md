@@ -8,17 +8,21 @@
 |---|---|
 | Parte obligatoria | ✅ completa (recall@5 con `bm25`: docs 0.870, code 0.758) |
 | Bonus 1 (embeddings) + 2 (híbrido) | ✅ por defecto `--retriever hybrid`: docs **0.910**, code **0.828** |
-| Bonus 4 (caché) | fase 0 (`Retriever`) ✅, fase 1 (modelo sin PyTorch) ✅, **fase 2 (`CachedRetriever`) en curso: 2.1 ✅, ahora 2.2** |
+| Bonus 4 (caché) | ✅ fases 0, 1 y 2 (`CachedRetriever` en disco, `--cache`). Fase 3 (caché de `answer`) opcional, sin decidir |
 | Bonus 5 (API HTTP), bonus 3 (indexado incremental) | pendientes |
 | Cierre (`.gitignore`, repaso README, defensa) | pendiente |
 
 Estimación dada al usuario: lleva un **75–80 %** del proyecto (obligatoria ~65 % + bonus 1/2 ~10 % + mitad del bonus 4).
 
-**Último commit:** `0885414` *Load the embedding model with numpy instead of sentence-transformers*. Después, sin commit: README y DEVLOG (Step 22) al día, este fichero, y lo que el usuario está programando.
+**Último commit:** `cefe27c` *Add the in-memory query cache and update docs (bonus 4)* (incluye 2.1 y el esqueleto de `QueryCache`). Después, sin commit (2026-10-06, en casa):
+- `README.md` reescrito (fusión de README + README2, al día; README2 borrado). Sin referencias a DEVLOG, `data/` ni ficheros de trabajo.
+- Arreglado en `HybridRetriever.search`: con `k > CANDIDATES` devolvía solo 30 → ahora `self._bm25.search(query, max(self.CANDIDATES, k))`. Pendiente: docstring ("Each of the CANDIDATES…") y un test con `k > CANDIDATES`.
+- Umbrales de memoria de `Generator` (3.5 / 2.0 GB): bajados **a propósito** para el campus. No es un error.
+- Modelos (potion y Qwen) siempre descargados de antemano en la máquina de la defensa: la descarga en `index` no es un riesgo.
 
-**Dónde lo dejó el usuario (paso 2.2):** `CachedRetriever` en memoria terminado y probado en `src/cached_retriever.py` (paso 2.1 ✅). Del paso 2.2 solo ha escrito el **esqueleto de `QueryCache`** en `src/models.py` (sin docstring y sin salto de línea final). Lo siguiente es el `__init__` con `cache_path` y `namespace`, `_read()`, `_changed` en `search` y `save()`: está todo detallado en el paso 2.2, abajo.
+**Bonus 4 fase 2 terminada (2026-10-06, sin commit):** 2.2 (disco), 2.3 (CLI) y 2.4 (tests, medidas, README, DEVLOG Step 23). Un fichero de caché por retriever (`query_cache_{bm25,hybrid}.json`). Medido en casa: `search_dataset` docs 1.94 s → 0.32 s; `test_retrieval` 4.4 s → 0.7 s; recall idéntico. **1150 tests**, `make lint-strict` limpio. Siguiente: decidir fase 3 o pasar al bonus 5 (API HTTP).
 
-**Ojo también:** si en el último commit `VectorIndexError` (`src/exceptions.py`) no tiene docstrings, es que se borraron sin querer: recuperarlos de `git log -p src/exceptions.py` (texto: clase *"The saved vector index cannot be used (unreadable file or arrays that do not fit together)."*; `__init__` *"Prefix the problem so the user knows which index failed."* con `Args: error: What is wrong, ending with what to do.`).
+**Mensaje de commit propuesto:** *Add the on-disk query cache with --cache (bonus 4)*
 
 **Si se continúa en casa:** `data/processed` no está en git. Antes de medir nada hay que ejecutar `uv run -m src index` (crea `index.json`, `vectors.npy`, `owners.npy`, `embeddings.npy`, `tokenizer.json`; ~13 s en el campus, menos en casa). En el campus el entorno está en `/sgoinfre` (`UV_PROJECT_ENVIRONMENT=/sgoinfre/students/saperez-/rag-venv`, `HF_HOME=/sgoinfre/students/saperez-/hf`); en casa serán otros, no hace falta tocarlos.
 
@@ -397,7 +401,7 @@ Idea: la "caché del índice". `index` copia lo que el modelo necesita **dentro 
 - [x] ~~(Opcional) `encode` sin bucle~~: medido y descartado. Bucle 1.6 s; `np.add.reduceat` 13–16 s (copia las 7.3 M filas antes de sumar); matriz de conteos × tabla 1.6 s. El trabajo son las sumas, no las vueltas de Python. Tokenizar (2.4 s) pesa más.
 - [x] README y DEVLOG (Step 22) al día.
 
-## Fase 2 — Preguntas repetidas: `CachedRetriever` (EN CURSO: paso 2.2)
+## Fase 2 — Preguntas repetidas: `CachedRetriever` ✅
 
 **Para qué:** si una pregunta ya se buscó, devolver el resultado guardado sin buscar; y si **todas** están en caché, no cargar ni los índices. Objetivo: repetir `search_dataset` pasa de ~3 s a unas décimas; `search` repetido, sin cargar nada.
 

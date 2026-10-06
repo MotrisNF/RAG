@@ -101,6 +101,9 @@ test_rag_base:
 #   test_retrieval: at most 90 s for 200 questions (both public datasets,
 #                   199 questions, each search_dataset loading the index).
 #   test_limits:    both.
+#   test_limits_cached: test_limits (index removes the query cache, so the
+#                   searches are uncached), then test_retrieval again
+#                   without indexing (every question read from the cache).
 INDEX_LIMIT     := 300
 PASS            := printf '\033[1;32mPASS\033[0m\n'
 FAIL            := printf '\033[1;31mFAIL\033[0m\n'
@@ -133,6 +136,12 @@ test_retrieval:
 	else $(FAIL); exit 1; fi
 
 test_limits: test_index test_retrieval
+
+test_limits_cached:
+	@echo "===== 1/2: index, then search without cache"
+	@$(MAKE) --no-print-directory test_index test_retrieval
+	@echo "===== 2/2: search again, no index (query cache)"
+	@$(MAKE) --no-print-directory test_retrieval
 
 # Answer battery: runs `answer` on every question of tests/answer_battery
 # (one file per question: a QUESTION: line and an EXPECTED: line) and prints
@@ -206,4 +215,4 @@ cleandata:
 	@find $(BASE_DATA)/output -type f -name '*.json' -delete
 	@echo "Index and generated outputs removed"
 
-.PHONY: all install run debug lint lint-strict test test_rag test_rag_base test_index test_retrieval test_limits test_answer test_answer_dataset clean cleandata
+.PHONY: all install run debug lint lint-strict test test_rag test_rag_base test_index test_retrieval test_limits test_limits_cached test_answer test_answer_dataset clean cleandata

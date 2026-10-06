@@ -623,6 +623,37 @@ Patterns found:
 - **Removing the averaging loop does not help** (measured three times each, corpus of 7.3 M tokens): loop 1.6 s, `np.add.reduceat` 13–16 s (it first copies every token row, ~7.5 GB moved in batches), a count matrix times the table 1.6 s. Each `table[ids].mean()` already adds in C; the work is the ~1.9 billion additions, not the 59,828 Python iterations. Tokenizing (2.4 s, Rust) is the larger part. Loop kept.
 - Benchmarks on a shared machine jump around (load average 2–5): repeat them and compare within the same run.
 
+## Step 23 — Bonus 4, part 2: query-result cache (2026-10-06) · commit `cefe27c` (in-memory part) + uncommitted
+
+**What**
+- **`CachedRetriever`** (`src/cached_retriever.py`), decorator pattern: it **is** a `Retriever` and **contains** another one (BM25 or hybrid), which do not change. It receives `load_inner`, a function that builds the wrapped retriever, instead of the retriever itself, and only calls it on the first question that is not cached (`_retriever()`, same idea as `VectorIndex._encoder`). Results are kept by `"<k>:<query>"`, and `search` returns copies.
+- **On disk:** `QueryCache(namespace, entries)` in `models.py` (pydantic, not pickle). `_read()` starts empty when the file is missing, broken, not UTF-8 (`UnicodeDecodeError`, found in review: `'garbage {'` is ASCII and did not catch it) or from another namespace. `flush()` writes only if something was added (`_changed`, reset after a good write), to a `.tmp` file first and then `os.replace`; an `OSError` only prints a warning.
+- **`Retriever.flush()`**, not abstract and empty: the commands call `indexer.flush()` without knowing which retriever they have (option (a), also ready for the HTTP API). Not called `save`: `BM25Index.save(index_dir)` would be an incompatible override.
+- **Namespace** (`RagCLI._cache_namespace`): retriever, `K1`, `B` (+ `CANDIDATES`, `ALPHA`, model for hybrid) and `size:mtime_ns` of `index.json` (+ `vectors.npy`), read with `stat()` only. A missing file is `"<name>:missing"`: the "Run 'index' first" error still comes from loading. Kept in `RagCLI` so `CachedRetriever` stays generic.
+- **CLI:** `_load_retriever(index_dir, retriever, cache)` → `_build_retriever` (the old body) or `CachedRetriever(lambda: _build_retriever(...), namespace, path)`. `--cache` (default `True`, off with `--cache=False`) in `search`, `search_dataset` and `answer`; `flush()` after the searches (after the loop in `search_dataset`, before loading Qwen in `answer`). `index` removes the caches after saving the new index.
+- **Bug found while measuring:** one shared `query_cache.json` was overwritten at every switch of `--retriever` (a `bm25` search left 1 entry where 100 `hybrid` ones were). Fixed with one file per retriever: `FILE_NAME = "query_cache_{name}.json"`, `CachedRetriever.file_path(index_dir, name)`; `index` removes all of them (`get_args(RetrieverMode)`).
+- **Also:** `HybridRetriever` asked BM25 for `CANDIDATES` (30) hits whatever `k` was, so `search --k 50` returned 30. Now `max(CANDIDATES, k)`, with a test that fails without it.
+- **Tests:** `tests/test_cached_retriever.py` (33 tests, checked with 6 mutations of the code: each one breaks at least one test). Suite: **1,150 tests**, `make lint-strict` clean.
+
+**Measured** (development PC; results and recall identical with and without cache):
+
+| | No cache | Cached |
+|---|---|---|
+| `search_dataset` docs, hybrid | 1.94 s | 0.32 s |
+| `search_dataset` docs, bm25 | 0.94 s | 0.33 s |
+| `make test_retrieval` (199 questions) | 4.4 s | 0.7 s |
+| `search`, one question | 0.78 s | 0.33 s |
+
+Cache file: ~3.7 MB for 100 questions with k = 10 (whole `SearchHit`s, chunk text included).
+
+**Why**
+- Each CLI command is a new process, so an in-memory dict (or `lru_cache`) dies with it: the cache has to live on disk. Storing the whole `SearchHit` (and not only `chunk_id` + score) is what lets a cached command skip loading the index.
+
+**Learned**
+- Lazy loading is the whole point: loading the indexes (~1 s) costs far more than the searches (~7 ms each).
+- A static method can read other classes' constants (`BM25Index.K1`) without any instance.
+- `os.replace` is atomic: either the old file or the new one, never half of each.
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
@@ -736,7 +767,8 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 **Bonus** (only once the mandatory part is perfect)
 - [x] Semantic embeddings (`potion-base-8M` instead of MiniLM: time limit) and hybrid retrieval (re-ranking instead of reciprocal rank fusion): Step 21.
 - [x] `Retriever` base class (Step 22).
-- [ ] Caching: cold start done (Step 22, model with numpy); query-result cache (`CachedRetriever`) next. Then local HTTP API, incremental indexing.
+- [x] Caching: cold start (Step 22, model with numpy) and query-result cache (Step 23, `CachedRetriever`).
+- [ ] Local HTTP API, then incremental indexing.
 
 **Final**
 - [ ] Edge cases, timings, README, `.gitignore` uncommented before delivery (no `data/`, PDF, `guia/`).

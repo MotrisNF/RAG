@@ -272,5 +272,14 @@ class WindowChunk(BaseModel):
 
 
 class QueryCache(BaseModel):
+    """The query cache as saved on disk (``query_cache_<retriever>.json``).
+
+    Attributes:
+        namespace: What produced the results: the retriever, its
+            parameters and the index files. Results saved with another
+            namespace are not reused.
+        entries: The hits of each search, by ``"<k>:<query>"``.
+    """
+
     namespace: str
     entries: dict[str, list[SearchHit]]
