@@ -1,0 +1,10 @@
+from abc import ABC, abstractmethod
+from .models import SearchHit
+
+
+class Retriever(ABC):
+    """Anything that returns the best chunks for a question."""
+
+    @abstractmethod
+    def search(self, query: str, k: int) -> list[SearchHit]:
+        """Return up to ``k`` hits, best first."""

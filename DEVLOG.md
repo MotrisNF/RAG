@@ -581,6 +581,28 @@ Patterns found:
 - Outdated tests fixed: `test_accepted` loaded Qwen for `answer` (it used the real index) and expected `NotImplementedError` from `answer_dataset`; `TestPendingCommands` removed (no pending command). Suite: 1,049 tests in ~20 s (was ~30 s, the model is never loaded now).
 - README brought up to date (status, `answer` JSON example, `answer_dataset`, new Makefile rules, final prompt strategy, battery and docs-dataset results, robustness table).
 
+## Step 21 — Bonuses 1 and 2: vector index and hybrid retrieval (2026-10-05 / 10-06) · commits `ceb60fe`, `ab988cb` (+ uncommitted)
+
+**What**
+- **Model chosen by measurement** (tables in README → *Semantic embeddings*): MiniLM needs ~400 s for the corpus here (~20 min on campus), over the 5-minute limit; `minishlab/potion-base-8M` (Model2Vec, static) embeds it in seconds with about the same recall as MiniLM at 128 tokens. With whole chunks, every model **lowered** recall when fused with BM25.
+- **What made the vectors useful:** windows of ~400 characters with max-pooling per chunk (docs 0.44 → 0.70) and the file-path words in front of each window (code 0.343 → 0.404); together 0.73 / 0.596. Re-ranking the BM25 top N with `(1 − α) BM25 / best + α similarity` beats BM25 where list fusion (RRF) never did. Sweep N × α × query stopwords (48 cells): N = 30, α = 0.5 (centre of the plateau), query as written.
+- **`VectorIndex`** (`src/vector_index.py`): `_get_window`, `_window_chunk` (path prefix), `build` (`np.repeat` for `owners`, `encode(..., normalize_embeddings=True)`), `save` / `load` as `vectors.npy` + `owners.npy`, `chunk_score` (`vectors @ query`, `np.maximum.at`), `chunk_count` property. The model is loaded from the local cache first and only on the first query (`_encoder`).
+- **`load` without pydantic:** `np.load` already returns the arrays with their shape and type, so there is nothing like `model_validate_json`; the shapes are checked by hand (`ndim` before `len`). Missing file → `IndexNotFoundError`, garbage (`ValueError`) or arrays that do not fit → new `VectorIndexError` (`DatasetError` needs a pydantic `ValidationError`).
+- **`HybridRetriever`** (`src/hybrid_retriever.py`): its own class, not inside `VectorIndex`, so the vector index does not depend on BM25. Same `search(query, k)` as `BM25Index`. Needs the id of each BM25 hit: `chunk_id` added to `SearchHit` (option A, cleaner than a `{id(chunk): position}` map). Checks `vector.chunk_count == bm25.chunk_count` (both exposed as properties, the attributes stay private). Returns `model_copy`s with the combined score; the stable sort keeps the BM25 order on ties.
+- **CLI:** `index` builds and saves both indexes from the same chunks (no `--retriever` there: both are always built). `search`, `search_dataset` and `answer` get `--retriever` (`RetrieverMode = Literal["bm25", "hybrid"]`, default `hybrid`), chosen in one place (`RagCLI._load_retriever`). No service layer or `Retriever` base class yet: `BM25Index | HybridRetriever` is enough until bonuses 4 and 5.
+- **Measured** (`make test_rag_base`, `make test_limits`): hybrid docs **0.910** / code **0.828** recall@5 (@10 0.920 / 0.859), exactly the experiment; `--retriever bm25` still 0.870 / 0.758. `index` 19.6–28.2 s, 199 questions 19.4 s. Checked against the subject: thresholds met with margin, and nothing forces a lexical default.
+- **Tests:** `tests/conftest.py` replaces the embedding model for every test with a fake bag-of-words encoder (cached word slots, `np.add.at`), so `make test` never loads PyTorch for it. New `test_vector_index.py` and `test_hybrid_retriever.py` (44 tests). CLI tests that only save a BM25 index use `--retriever bm25`. Suite: 1,093 tests in ~60 s.
+
+**Why**
+- Lexical search misses paraphrases (the hard mini questions); the vectors catch some of them, but only as a re-ranker: the BM25 here is already tuned for this corpus.
+
+**Learned**
+- A static model averages its token vectors: on a 2000-character chunk the answer is diluted. Small windows + the best window per chunk fixed most of it.
+- Removing stopwords helps BM25 but hurts the vectors: for an embedding the question words carry meaning.
+- `np.maximum.at` (not `best[owners] = ...`): with repeated indexes a plain assignment keeps only the last value.
+- The answer battery is not a retrieval measure: with the hybrid retriever question 07 came out reversed although its four right chunks were at the top. A 0.6B model reacts to the exact mix of chunks (as in the context-budget sweep). The battery took 521 s against 190 s; the hybrid part only adds ~6 s per `answer` (measured), so the rest was probably memory pressure (`auto` chose bfloat16).
+- Real bugs caught while building it: `self.FILE_NAME` / `self.VECTORS_NAME` copied names in `save`, `owners.ndi`, a `)` that left `chunk_id` outside `SearchHit(...)`, `index` calling `_load_retriever` (load instead of build).
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
@@ -692,7 +714,8 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [x] README: Requirements (automatic choice, thresholds) and Design decisions.
 
 **Bonus** (only once the mandatory part is perfect)
-- [ ] Semantic embeddings (`all-MiniLM-L6-v2`), hybrid retrieval (reciprocal rank fusion), incremental indexing, caching, local HTTP API.
+- [x] Semantic embeddings (`potion-base-8M` instead of MiniLM: time limit) and hybrid retrieval (re-ranking instead of reciprocal rank fusion): Step 21.
+- [ ] Caching, local HTTP API (after a service layer and a `Retriever` base class), incremental indexing.
 
 **Final**
 - [ ] Edge cases, timings, README, `.gitignore` uncommented before delivery (no `data/`, PDF, `guia/`).

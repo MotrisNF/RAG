@@ -11,13 +11,14 @@ from pathlib import Path
 from pydantic import ValidationError
 from tqdm import tqdm
 
+from .base_retriever import Retriever
 from .exceptions import (DatasetError, IndexBuildError, IndexNotFoundError,
                          PathError)
 from .models import Chunk, IndexData, SearchHit
 from .tokenizer_bm import Tokenizer
 
 
-class BM25Index:
+class BM25Index(Retriever):
     """Lexical search over chunks with the BM25 ranking function.
 
     Always created complete: from chunks with ``build`` or from disk with
@@ -56,6 +57,11 @@ class BM25Index:
         self._lengths = lengths
         self._avg_length: float = sum(self._lengths) / len(self._lengths)
         self._n_chunks: int = len(self._chunks)
+
+    @property
+    def chunk_count(self) -> int:
+        """Number of indexed chunks (chunk ids go from 0 to this - 1)."""
+        return self._n_chunks
 
     @classmethod
     def build(cls, chunks: list[Chunk]) -> "BM25Index":
@@ -147,7 +153,8 @@ class BM25Index:
             k: Maximum number of results.
 
         Returns:
-            Up to ``k`` hits, best first. Empty when no term matches.
+            Up to ``k`` hits, best first, each with its ``chunk_id``.
+            Empty when no term matches.
         """
         tokenized_query = set(self._tokenizer.tokenize_query(query))
 
@@ -168,7 +175,10 @@ class BM25Index:
         hits: list[SearchHit] = []
 
         for chunk_id, score in ranked:
-            hits.append(SearchHit(chunk=self._chunks[chunk_id], score=score))
+            hits.append(SearchHit(
+                chunk=self._chunks[chunk_id],
+                score=score,
+                chunk_id=chunk_id))
 
         return hits
 

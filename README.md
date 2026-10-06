@@ -8,18 +8,18 @@ A **Retrieval-Augmented Generation (RAG)** system that answers questions about a
 
 A small language model cannot know the details of a specific codebase, and when it does not know, it tends to invent a confident answer. A RAG system solves this in two steps:
 
-1. **Retrieval**: find the few pieces of the codebase that are relevant to the question (here with **BM25**, a classic lexical ranking function implemented from scratch).
+1. **Retrieval**: find the few pieces of the codebase that are relevant to the question. Here with **BM25**, a classic lexical ranking function implemented from scratch, whose best results are then **re-ranked by meaning** with a small CPU embedding model (`minishlab/potion-base-8M`).
 2. **Generation**: give those pieces to a small local model (**Qwen/Qwen3-0.6B**) as context, and ask it to answer **only** from them.
 
 The project is judged on both parts: retrieval is measured with **recall@k** against reference datasets (targets: recall@5 ≥ 80 % on documentation questions and ≥ 50 % on code questions), and answers must be coherent, on point and grounded in the retrieved sources.
 
 Current results:
-- **Retrieval** (public datasets, recall@5): **docs 87 %, code 75.8 %**. Indexing takes ~2 s and each 100-question dataset is searched in under 1 s.
+- **Retrieval** (public datasets, recall@5): **docs 91 %, code 82.8 %** with the hybrid retriever (default), 87 % / 75.8 % with BM25 alone. Indexing takes ~20 s and each 100-question dataset is searched in ~9 s, most of it loading the embedding model once.
 - **Generation** (the 100 public docs questions, judged by hand against the reference answers): **58 correct, 18 partly correct, 11 refusals, 13 wrong**, ~22 s per answer on CPU.
 
 Everything is exposed through a command-line interface (Python Fire): `index`, `search`, `search_dataset`, `answer`, `answer_dataset` and `evaluate`.
 
-> **Status (2026-10-05):** mandatory part complete: the six commands work end to end. Next: the bonus part.
+> **Status (2026-10-06):** mandatory part complete: the six commands work end to end. Bonuses 1 (semantic embeddings) and 2 (hybrid retrieval) done; `--retriever bm25` keeps the lexical search alone.
 
 ## Instructions
 
@@ -175,7 +175,7 @@ Each line below sets one option to show how it is written; the others keep their
 |---|---|---|
 | `--max_chunk_size` | `2000` | Maximum characters per chunk |
 | `--raw_dir` | `data/raw` | Corpus to index |
-| `--index_dir` | `data/processed` | Where the index is saved |
+| `--index_dir` | `data/processed` | Where the indexes are saved (`index.json`, `vectors.npy`, `owners.npy`) |
 
 ```bash
 uv run -m src index
@@ -198,6 +198,7 @@ make run ARGS="index --max_chunk_size 2000 --raw_dir data/raw --index_dir data/p
 | `--query` (or positional) | required | The question |
 | `--k` | `10` | Number of sources returned |
 | `--index_dir` | `data/processed` | Index built by `index` |
+| `--retriever` | `hybrid` | `hybrid` (BM25 re-ranked with the vector index) or `bm25` (words only) |
 
 ```bash
 uv run -m src search "How do I load a LoRA adapter?"
@@ -205,12 +206,14 @@ uv run -m src search --query "How do I load a LoRA adapter?"
 uv run -m src search "How do I load a LoRA adapter?" --k 5
 uv run -m src search "How do I load a LoRA adapter?" --index_dir data/processed
 uv run -m src search --query "How do I load a LoRA adapter?" --k 5 --index_dir data/processed
+uv run -m src search "How do I load a LoRA adapter?" --retriever bm25
 
 make run ARGS='search "How do I load a LoRA adapter?"'
 make run ARGS='search --query "How do I load a LoRA adapter?"'
 make run ARGS='search "How do I load a LoRA adapter?" --k 5'
 make run ARGS='search "How do I load a LoRA adapter?" --index_dir data/processed'
 make run ARGS='search --query "How do I load a LoRA adapter?" --k 5 --index_dir data/processed'
+make run ARGS='search "How do I load a LoRA adapter?" --retriever bm25'
 ```
 
 #### `search_dataset`
@@ -221,17 +224,20 @@ make run ARGS='search --query "How do I load a LoRA adapter?" --k 5 --index_dir 
 | `--k` | `10` | Sources per question |
 | `--save_directory` | `data/output/search_results/UnansweredQuestions` | Where the results are written (same file name as the dataset) |
 | `--index_dir` | `data/processed` | Index built by `index` |
+| `--retriever` | `hybrid` | `hybrid` (BM25 re-ranked with the vector index) or `bm25` (words only) |
 
 ```bash
 uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json
 uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_code_public.json --k 5
 uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --save_directory data/output/search_results/UnansweredQuestions
 uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --index_dir data/processed
+uv run -m src search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --retriever bm25
 
 make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json"
 make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_code_public.json --k 5"
 make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --save_directory data/output/search_results/UnansweredQuestions"
 make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --index_dir data/processed"
+make run ARGS="search_dataset --dataset_path data/datasets/UnansweredQuestions/dataset_docs_public.json --retriever bm25"
 ```
 
 #### `evaluate`
@@ -266,6 +272,7 @@ make run ARGS="evaluate --student_search_results_path data/output/search_results
 | `--query` (or positional) | required | The question |
 | `--k` | `10` | Sources given to the model as context |
 | `--index_dir` | `data/processed` | Index built by `index` |
+| `--retriever` | `hybrid` | `hybrid` (BM25 re-ranked with the vector index) or `bm25` (words only) |
 | `--dtype` | `auto` | `auto` (chosen from free memory), `float32` or `bfloat16` (forced, no memory check) |
 
 ```bash
@@ -274,12 +281,14 @@ uv run -m src answer --query "What is the minimum version of bitsandbytes requir
 uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --k 5
 uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --index_dir data/processed
 uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --dtype bfloat16
+uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --retriever bm25
 
 make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?"'
 make run ARGS='answer --query "What is the minimum version of bitsandbytes required for vLLM quantization?"'
 make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --k 5'
 make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --index_dir data/processed'
 make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --dtype bfloat16'
+make run ARGS='answer "What is the minimum version of bitsandbytes required for vLLM quantization?" --retriever bm25'
 ```
 
 #### `answer_dataset`
@@ -358,18 +367,24 @@ make test_answer_dataset ANSWER_DATASET=data/datasets/AnsweredQuestions/dataset_
 ## System architecture
 
 ```
-                 index                                     search / search_dataset
-data/raw ──► CorpusReader ──► PyChunker (.py) ──┐                 │
-                              MdChunker (.md,   ├─► BM25Index ──► save ──► data/processed/index.json
-                                        .txt) ──┘   (Tokenizer)                    │
-                                                                                   ▼
-question ──► Tokenizer.tokenize_query ──► BM25Index.search (load) ──► top-k chunks ──► JSON
-                                                                          │
-                                                       answer             ▼
-                                                              Generator (Qwen3-0.6B)
-                                                              _build_context → _build_messages
-                                                              → chat template → generate → answer
+                 index
+data/raw ──► CorpusReader ──► PyChunker (.py) ──┐   ┌─► BM25Index ─────► save ──► data/processed/index.json
+                              MdChunker (.md,   ├───┤   (Tokenizer)
+                                        .txt) ──┘   └─► VectorIndex ───► save ──► data/processed/vectors.npy
+                              (same chunks, same order)  (windows +             data/processed/owners.npy
+                                                          potion-base-8M)
+
+                 search / search_dataset / answer            (--retriever hybrid, the default)
+question ──► BM25Index.search ──► top 30 candidates ──┐
+        └──► VectorIndex.chunk_score ─────────────────┴─► HybridRetriever: re-rank ──► top-k chunks ──► JSON
+                                                                                          │
+                                                                       answer             ▼
+                                                                              Generator (Qwen3-0.6B)
+                                                                              _build_context → _build_messages
+                                                                              → chat template → generate → answer
 ```
+
+With `--retriever bm25` the top-k chunks come straight from `BM25Index.search` and the vector index is not loaded.
 
 | Component | File | Role |
 |---|---|---|
@@ -380,9 +395,11 @@ question ──► Tokenizer.tokenize_query ──► BM25Index.search (load) �
 | `PyChunker`, `MdChunker` | `src/chunker.py` | The two chunking strategies, both built on `FixedSizeChunker` (see below). |
 | `Tokenizer` | `src/tokenizer_bm.py` | Text → terms, the same for chunks and queries; drops stopwords from queries only. |
 | `BM25Index` | `src/bm25_index.py` | Builds the inverted index, ranks chunks, saves and loads it as JSON. |
-| `Generator` | `src/generator.py` | Loads Qwen3-0.6B once, fits the retrieved chunks into the token budget, builds the prompt and generates the answer. Imported only by `answer` / `answer_dataset`, so the other commands never load PyTorch. |
+| `VectorIndex` | `src/vector_index.py` | Splits every chunk into windows, embeds them with `potion-base-8M`, scores every chunk by its best window; saves and loads two `.npy` files. The model is loaded only when needed. |
+| `HybridRetriever` | `src/hybrid_retriever.py` | Re-ranks the BM25 candidates with the vector scores. Same `search(query, k)` as `BM25Index`, so the commands use either one (`RagCLI._load_retriever`). |
+| `Generator` | `src/generator.py` | Loads Qwen3-0.6B once, fits the retrieved chunks into the token budget, builds the prompt and generates the answer. Imported only by `answer` / `answer_dataset`, so the other commands never load Qwen. |
 | `Evaluator` | `src/evaluator.py` | recall@k with the moulinette's rules (same file, character IoU ≥ 0.05, sources ≤ 2000 characters). |
-| Models | `src/models.py` | The subject's pydantic models (`MinimalSource`, `StudentSearchResults`…) plus internal ones (`Chunk`, `Document`, `SearchHit`, `IndexData`). |
+| Models | `src/models.py` | The subject's pydantic models (`MinimalSource`, `StudentSearchResults`…) plus internal ones (`Chunk`, `Document`, `SearchHit`, `IndexData`, `WindowChunk`). |
 | Errors | `src/exceptions.py` | One hierarchy (`RagError`): every expected failure ends with a clear message and an exit code, never a traceback. |
 
 ## Chunking strategy
@@ -422,6 +439,21 @@ Only chunks that share at least one term are scored. The top k are taken with `h
 
 **Query stopwords.** Question words and common English words (`what`, `how`, `the`, `use`…) are removed from the **query only** (`Tokenizer.tokenize_query`). In a code corpus they are rare, so BM25 would give them a high idf (`why` 5.54, `how` 3.78, against 2.45 for `lora`), and chunks that only share the wording of the question would rank high.
 
+**Vector re-ranking** (bonuses 1 and 2; `src/vector_index.py`, `src/hybrid_retriever.py`). The default retriever; the choices below are measured in *Semantic embeddings*.
+
+- **Model:** `minishlab/potion-base-8M` (Model2Vec, a static embedding model of ~30 MB loaded with `sentence-transformers`). It embeds the whole corpus in ~4 s on CPU; MiniLM would need ~6 min here and ~20 min on campus.
+- **Windows:** each chunk is split into windows of whole lines of up to `MAX_WINDOW_SIZE` (400) characters, and the words of its file path are put in front of each window (`vllm model executor … bitsandbytes py\n<window>`). 59,828 vectors of 256 dimensions, normalised, saved as `vectors.npy` with `owners.npy` (the chunk id of each window).
+- **Chunk score:** the question is embedded as written (stopwords kept), the dot product with every window is its cosine similarity, and a chunk keeps the score of its **best** window (`np.maximum.at`).
+- **Re-ranking:** BM25 gives its top `CANDIDATES` (30); each gets
+
+  ```
+  combined = (1 − ALPHA) × BM25 score / best BM25 score + ALPHA × similarity      (ALPHA = 0.5)
+  ```
+
+  and the candidates are sorted again (ties keep the BM25 order). Dividing by the best BM25 score puts both parts on the same 0–1 scale. The vectors only reorder chunks BM25 already found, so they cannot bring in a chunk with none of the question's words.
+- **Same chunk ids:** `index` builds both indexes from the same list of chunks, and every `SearchHit` carries its `chunk_id`. `HybridRetriever` checks that both indexes have the same `chunk_count`; if one was rebuilt without the other, it stops with *"Run 'index' again"*.
+- **Cost:** ~4 s more for `index`, ~6 s to load the model once per command (mostly importing PyTorch), then ~7 ms per question.
+
 **Generation** (`src/generator.py`).
 - **Context:** the ranked chunks, best first, each with its file path, until `MAX_CONTEXT_TOKENS` (**2200**, counted with Qwen's own tokenizer).
 - **Prompt:**
@@ -438,18 +470,25 @@ Measured on the public datasets (100 docs questions, 99 code questions) and on t
 
 ### Current results
 
-Moulinette, chunks of 2000 characters, k = 10:
+Moulinette, chunks of 2000 characters, k = 10 (`make test_rag_base`, 2026-10-06):
 
-| Dataset | Recall@1 | Recall@3 | **Recall@5** | Recall@10 | Target (@5) |
-|---|---|---|---|---|---|
-| docs | 0.610 | 0.830 | **0.870** | 0.920 | ≥ 0.80 ✅ |
-| code | 0.515 | 0.717 | **0.758** | 0.818 | ≥ 0.50 ✅ |
+| Retriever | Dataset | Recall@1 | Recall@3 | **Recall@5** | Recall@10 | Target (@5) |
+|---|---|---|---|---|---|---|
+| **hybrid** (default) | docs | 0.640 | 0.870 | **0.910** | 0.920 | ≥ 0.80 ✅ |
+| | code | 0.545 | 0.778 | **0.828** | 0.859 | ≥ 0.50 ✅ |
+| `bm25` | docs | 0.610 | 0.830 | **0.870** | 0.920 | ≥ 0.80 ✅ |
+| | code | 0.515 | 0.717 | **0.758** | 0.818 | ≥ 0.50 ✅ |
+
+The hybrid numbers are exactly those of the experiment that chose the configuration (see *Semantic embeddings: tuning*).
 
 | Step | Time | Subject limit |
 |---|---|---|
-| `index` (1,969 files, 20.1 M characters → 12,907 chunks, build, save) | ~2 s | 5 min |
-| `search_dataset` (100 questions, including loading the 35 MB index) | < 1 s | 90 s for 200 questions |
-| Loading the index | ~0.35 s | |
+| `index` (1,969 files, 20.1 M characters → 12,907 chunks, both indexes built and saved) | ~20–28 s (BM25 ~2 s, vectors ~4 s, the rest loading PyTorch) | 5 min |
+| `search_dataset`, hybrid (100 questions, including loading both indexes and the embedding model) | ~9 s | 90 s for 200 questions |
+| `search_dataset`, `--retriever bm25` | ~2 s | |
+| `make test_limits` (hybrid) | index 28.2 s, 199 questions 19.4 s: PASS | |
+| Loading the BM25 index / the vector index | ~0.8 s / < 0.1 s | |
+| Loading the embedding model (first query) | ~6 s | |
 | `answer`: load Qwen3-0.6B | ~5.6 s | |
 | `answer`: whole command (load + one answer) | ~15–25 s | no limit for generation |
 | `answer_dataset`-like run on the 100 docs questions (`make test_answer_dataset`) | ~37 min (~22 s per question) | |
@@ -462,7 +501,8 @@ Moulinette, chunks of 2000 characters, k = 10:
 | 2026-10-02 | `PyChunker`, file path and snake_case terms, `K1 = 1.9`, `B = 0.5` | 0.830 | 0.727 |
 | 2026-10-02 | `MdChunker` with the code-fence separator | 0.860 | 0.727 |
 | 2026-10-02 | Dotted-name pass removed, `.txt` with `MdChunker`, decorators kept with their `def` | 0.860 | 0.717 |
-| 2026-10-03 | Query stopwords | **0.870** | **0.758** |
+| 2026-10-03 | Query stopwords | 0.870 | 0.758 |
+| 2026-10-06 | Hybrid retriever: BM25 top 30 re-ranked with `potion-base-8M` windows (α = 0.5) | **0.910** | **0.828** |
 
 All the experiments behind these steps follow, in the order they were made. Rows marked as not implemented were measured and discarded.
 
@@ -725,6 +765,7 @@ Query without stopwords:
 - **Not a lucky cell:** every configuration with 20–50 candidates and α between 0.3 and 0.7 beats BM25 (docs 0.89–0.92, code 0.78–0.83). The chosen one is the middle of that plateau, not its best cell.
 - **Removing the query stopwords hurts the vectors** (1–2 points), the opposite of BM25: the question words carry part of its meaning for an embedding, while for BM25 they only add noise.
 - **Caveat:** the parameters were tuned on the same public datasets they are measured on. The plateau makes overfitting unlikely, but the private datasets of the defense may show a smaller gain.
+- **Implemented** in `VectorIndex` and `HybridRetriever` (2026-10-06) with the same results. The implementation keeps windows made only of whitespace (59,828 vectors instead of 59,778); recall is unchanged.
 
 ### Generation (2026-10-03)
 
@@ -872,7 +913,7 @@ What was tried to make the system faster and harder to break, with its measured 
 | Own BM25 with a JSON index (pydantic) | Indexing and search time | Index ~2 s (limit 5 min), 100 questions < 1 s (limit 90 s for 200) | ✅ |
 | Dotted-name tokenizer pass | Recall of quoted module names | No gain, more terms to index | ❌ removed |
 | Chunk overlap | Answers split between chunks | Hurts docs, gains on code are noise | ❌ |
-| Lazy import of `Generator` | PyTorch takes seconds to load | `index`, `search`, `evaluate`, `--help` never load it | ✅ |
+| Lazy import of `Generator` | PyTorch takes seconds to load | `index`, `search`, `evaluate`, `--help` never load Qwen (the hybrid retriever loads PyTorch through `sentence-transformers`) | ✅ |
 | Load the model once | `answer_dataset` with many questions | One load (~5.6 s) per command, not per question | ✅ |
 | `float32` instead of the default `bfloat16` | bfloat16 is emulated on this CPU | Prompt read 29 s → 10 s; answer ~40 s → ~19 s | ✅ when it fits |
 | Memory check before loading | Out of memory → `Killed`, nothing to catch | float32, bfloat16 or a clean error, from the available memory | ✅ |
@@ -885,11 +926,13 @@ What was tried to make the system faster and harder to break, with its measured 
 | Paths normalised without following symbolic links | A `data/raw` linked to another disk (`goinfre` on 42 computers) was rejected as "outside the project" | Linked corpus accepted, stored paths keep the `data/raw/...` form, `--raw_dir ../` still rejected | ✅ |
 | No model for empty inputs | `answer` with no matching source, `answer_dataset` with no question | The model is not loaded: fixed message or empty output | ✅ |
 | Static embedding model (Model2Vec `potion-base-8M`) instead of MiniLM | MiniLM needs ~6 min on this PC (~20 min on campus) to embed the corpus | ~2 s, about the same recall as MiniLM at 128 tokens; see *Semantic embeddings* | ✅ |
-| Windows + file path for the vectors, re-ranking of the BM25 top 30 | Averaged vectors of whole chunks lowered recall when fused with BM25 | Recall@5 docs 0.870 → 0.910, code 0.758 → 0.828; ~3 s more indexing | ✅ (to implement) |
+| Windows + file path for the vectors, re-ranking of the BM25 top 30 | Averaged vectors of whole chunks lowered recall when fused with BM25 | Recall@5 docs 0.870 → 0.910, code 0.758 → 0.828 (same as the experiment); `index` ~20 s, 200 questions ~19 s | ✅ default, `--retriever bm25` to compare |
+| Vector index saved as `.npy`, checked by hand on load | No pydantic for arrays; a missing or foreign file must not crash | Missing file → *"Run 'index' first"*; garbage or arrays that do not fit → clean `VectorIndexError` | ✅ |
+| Lazy model load in `VectorIndex` | `--retriever bm25`, `evaluate` and `--help` should not pay for PyTorch | The model is loaded on the first query; `bm25` never loads it | ✅ |
 
 ### Tests
 
-`make test` runs **1,049 tests** in ~20 s, without loading the model (the memory-safe loading and the answers are checked end to end as described above):
+`make test` runs **1,093 tests** in ~60 s, without loading Qwen or the embedding model (the memory-safe loading and the answers are checked end to end as described above):
 
 - **Chunkers:**
   - invariants (exact offsets, no gaps or overlaps, never above the maximum, always progresses) on random texts and on the whole real corpus;
@@ -901,6 +944,11 @@ What was tried to make the system faster and harder to break, with its measured 
   - idf, saturation, length normalisation, deterministic tie-breaking;
   - save/load round trip;
   - query stopwords.
+- **Vector index and hybrid retriever** (`tests/conftest.py` replaces the embedding model, for every test, with a fake bag-of-words encoder):
+  - windows (whole lines, the long-line case, joined back to the text), path prefix, owners in chunk order;
+  - best window per chunk (the worked example of the plan), scores in [−1, 1];
+  - save/load round trip, missing file, garbage file, arrays that do not fit;
+  - the combination formula on fixed scores, `ALPHA = 0` gives exactly the BM25 order, `ALPHA = 1` the similarity order, only BM25 candidates come out, ties keep the BM25 order, mismatched indexes rejected.
 - **Evaluator:** IoU, cutoffs, missing and unknown questions, validation errors, the same numbers as the moulinette.
 - **CLI:** every command, argument validation and error messages, unknown or private options, exit codes, `--help`.
 - **Paths:** corpus folders outside the project rejected, symbolic links accepted, source paths of `answer_dataset` checked (absolute paths and `..`).
@@ -913,6 +961,9 @@ What was tried to make the system faster and harder to break, with its measured 
 - **JSON index validated with pydantic** instead of pickle. It loads in ~0.35 s, can be inspected, and a corrupted or foreign file gives a clear error instead of arbitrary behaviour.
 - **Two chunkers sharing one cutting algorithm.** `PyChunker` and `MdChunker` only declare their separators. The invariants are proven once, for every strategy.
 - **Measure every change on its own.** Each idea (path terms, tokenizer passes, heading cuts, overlap, stopwords) was measured alone against the previous configuration, and kept only if it helped. Heading cuts and overlap sounded right and were discarded by the numbers.
+- **Vectors re-rank BM25 instead of fusing two lists.** Fused lists let the vectors bring in chunks with none of the question's words, and lost to BM25 alone; re-ranking the BM25 top 30 only reorders good candidates (see *Semantic embeddings*).
+- **Three classes for the hybrid search:** `BM25Index` searches by words, `VectorIndex` scores by meaning, `HybridRetriever` combines them. `VectorIndex` does not depend on BM25, and `HybridRetriever` has the same `search` as `BM25Index`, so the commands choose one in a single place (`_load_retriever`).
+- **A static embedding model with windows** instead of a transformer like MiniLM: it fits the campus time limit with room to spare, and windows plus max-pooling recover what averaging a whole chunk loses.
 - **Stopwords on the query only.** The index keeps every term, so the list can change without rebuilding it.
 - **Lazy import of the generator.** `answer` and `answer_dataset` import `Generator` inside the command, so `index`, `search`, `evaluate` and `--help` never pay the seconds PyTorch takes to load.
 - **Load the model once.** `Generator.__init__` loads Qwen; each question only calls `generate`.

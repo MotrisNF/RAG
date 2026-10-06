@@ -54,7 +54,8 @@ class TestValidArguments:
         ``evaluate`` and ``answer_dataset`` get a small valid results file
         (no questions, so ``answer_dataset`` never loads the model), and
         ``answer`` an index where the question matches nothing (no
-        sources, so the model is not loaded either).
+        sources, so the model is not loaded either). The searches get
+        only a BM25 index, so they use ``--retriever bm25``.
         """
         if command[0] in ("evaluate", "answer_dataset"):
             (tmp_path / "folder").mkdir()
@@ -74,12 +75,14 @@ class TestValidArguments:
             chunk = Chunk(file_path="data/raw/a.md", first_character_index=0,
                           last_character_index=12, text="Nothing here")
             BM25Index.build([chunk]).save(tmp_path)
-            command = [*command, "--index_dir", str(tmp_path)]
+            command = [*command, "--index_dir", str(tmp_path),
+                       "--retriever", "bm25"]
         if command[0] in ("search", "search_dataset"):
             chunk = Chunk(file_path="data/raw/a.md", first_character_index=0,
                           last_character_index=15, text="How to use LoRA")
             BM25Index.build([chunk]).save(tmp_path)
-            command = [*command, "--index_dir", str(tmp_path)]
+            command = [*command, "--index_dir", str(tmp_path),
+                       "--retriever", "bm25"]
         try:
             fire.Fire(RagCLI, command=command)
         except NotImplementedError:

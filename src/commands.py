@@ -17,6 +17,7 @@ from pydantic import (BaseModel, ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
 from tqdm import tqdm
 
+from .base_retriever import Retriever
 from .bm25_index import BM25Index
 from .chunker import MdChunker, PyChunker
 from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
@@ -25,8 +26,11 @@ from .evaluator import Evaluator
 from .models import (Chunk, DtypeMode, MinimalSearchResults, MinimalSource,
                      StudentSearchResults, RagDataset, UnansweredQuestion,
                      EvaluationInform, MinimalAnswer,
-                     StudentSearchResultsAndAnswer, NO_SOURCES)
+                     StudentSearchResultsAndAnswer, NO_SOURCES, RetrieverMode,
+                     )
 from .reader import CorpusReader
+from .vector_index import VectorIndex
+from .hybrid_retriever import HybridRetriever
 
 F = TypeVar("F", bound=Callable[..., Any])
 M = TypeVar("M", bound=BaseModel)
@@ -132,12 +136,12 @@ class RagCLI:
             raw_dir: Annotated[str, Field(min_length=1)] = "data/raw",
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
             ) -> None:
-        """Read the corpus in raw_dir, build the search index, save it.
+        """Read the corpus in raw_dir, build the search indexes, save them.
 
         Steps: read the files (CorpusReader), split them into chunks
         (PyChunker for Python, MdChunker for Markdown and text), build the
-        BM25 index and save it in index_dir, where the search commands
-        load it from.
+        BM25 index and the vector index from the same chunks, and save
+        both in index_dir, where the search commands load them from.
 
         Args:
             max_chunk_size: Maximum length of a chunk, in characters (the
@@ -177,6 +181,9 @@ class RagCLI:
         print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
         bm25 = BM25Index.build(chunks)
         bm25.save(Path(index_dir))
+        # Same chunks in the same order: chunk ids must match BM25.
+        vectors = VectorIndex.build(chunks)
+        vectors.save(Path(index_dir))
         print(f"Ingestion complete! Index saved under {index_dir}/")
 
     @CliCommand.validated
@@ -184,7 +191,8 @@ class RagCLI:
             self,
             query: Annotated[str, Field(min_length=1)],
             k: Annotated[int, Field(gt=0)] = 10,
-            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
+            retriever: RetrieverMode = "hybrid"
             ) -> None:
         """Print the top-k sources for a single question, as JSON.
 
@@ -195,14 +203,44 @@ class RagCLI:
             query: The question to search for.
             k: Number of sources to return.
             index_dir: Folder where the index command saved the index.
+            retriever: ``hybrid`` reranks the BM25 results with the vector
+                index (better recall); ``bm25`` uses the words only.
         """
-        bm25 = BM25Index.load(Path(index_dir))
+        indexer = self._load_retriever(index_dir, retriever)
         question = UnansweredQuestion(question=query)
         results = StudentSearchResults(
-            search_results=[self._search_question(bm25, question, k)],
+            search_results=[self._search_question(indexer, question, k)],
             k=k,
         )
         print(results.model_dump_json(indent=2))
+
+    @staticmethod
+    def _load_retriever(index_dir: str,
+                        retriever: RetrieverMode
+                        ) -> Retriever:
+        """Load the saved indexes the chosen retriever needs.
+
+        Both retrievers have the same ``search(query, k)``, so the
+        commands use either one without knowing which.
+
+        Args:
+            index_dir: Folder where the index command saved the indexes.
+            retriever: ``bm25`` or ``hybrid``.
+
+        Returns:
+            The BM25 index, or a HybridRetriever over both indexes.
+
+        Raises:
+            IndexNotFoundError: An index file is missing.
+            PathError: An index file cannot be read.
+            DatasetError: The BM25 index file is not valid.
+            VectorIndexError: The vector index is not valid or does not
+                match the BM25 index.
+        """
+        bm25 = BM25Index.load(Path(index_dir))
+        if retriever == "bm25":
+            return bm25
+        return HybridRetriever(bm25, VectorIndex.load(Path(index_dir)))
 
     @staticmethod
     def _open_file_save(path: Path, model: type[M]) -> M:
@@ -232,7 +270,8 @@ class RagCLI:
             raise DatasetError(str(path), e) from e
 
     @staticmethod
-    def _search_question(bm25: BM25Index, question: UnansweredQuestion,
+    def _search_question(indexer: Retriever,
+                         question: UnansweredQuestion,
                          k: int) -> MinimalSearchResults:
         """Search one question and keep only the source locations.
 
@@ -240,7 +279,7 @@ class RagCLI:
         the chunk text and the score are not part of the output format.
 
         Args:
-            bm25: A loaded index.
+            indexer: A loaded retriever (see ``_load_retriever``).
             question: The question, with its id.
             k: Number of sources to retrieve.
 
@@ -253,7 +292,7 @@ class RagCLI:
                 first_character_index=hit.chunk.first_character_index,
                 last_character_index=hit.chunk.last_character_index,
             )
-            for hit in bm25.search(question.question, k)
+            for hit in indexer.search(question.question, k)
         ]
         return MinimalSearchResults(
             question_id=question.question_id,
@@ -315,7 +354,8 @@ class RagCLI:
                 str,
                 Field(min_length=1)
                 ] = "data/output/search_results/UnansweredQuestions",
-            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
+            retriever: RetrieverMode = "hybrid"
             ) -> None:
         """Search every question of a dataset and save the results as JSON.
 
@@ -325,8 +365,10 @@ class RagCLI:
             save_directory: Folder where the StudentSearchResults file is
                 written, with the same file name as the dataset.
             index_dir: Folder where the index command saved the index.
+            retriever: ``hybrid`` reranks the BM25 results with the vector
+                index (better recall); ``bm25`` uses the words only.
         """
-        bm25 = BM25Index.load(Path(index_dir))
+        indexer = self._load_retriever(index_dir, retriever)
         dataset = self._open_file_save(dataset_path, RagDataset)
 
         results_list: list[MinimalSearchResults] = []
@@ -335,7 +377,7 @@ class RagCLI:
                         desc="Searching in the index",
                         unit="question"
                         ):
-            results_list.append(self._search_question(bm25, question, k))
+            results_list.append(self._search_question(indexer, question, k))
         output = StudentSearchResults(search_results=results_list, k=k)
         try:
             Path(save_directory).mkdir(parents=True, exist_ok=True)
@@ -352,6 +394,7 @@ class RagCLI:
             query: Annotated[str, Field(min_length=1)],
             k: Annotated[int, Field(gt=0)] = 10,
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
+            retriever: RetrieverMode = "hybrid",
             dtype: DtypeMode = "auto"
             ) -> None:
         """Answer a single question using the retrieved sources as context.
@@ -360,6 +403,8 @@ class RagCLI:
             query: The question to answer.
             k: Number of sources to retrieve as context.
             index_dir: Folder where the index command saved the index.
+            retriever: ``hybrid`` reranks the BM25 results with the vector
+                index (better recall); ``bm25`` uses the words only.
             dtype: How to load the model. ``auto`` chooses float32 or
                 bfloat16 from the available memory; ``float32`` or
                 ``bfloat16`` force it, without the memory check (for
@@ -367,8 +412,8 @@ class RagCLI:
         """
 
         # The index first: its errors show up before PyTorch is imported.
-        bm25 = BM25Index.load(Path(index_dir))
-        hits = bm25.search(query, k)
+        indexer = self._load_retriever(index_dir, retriever)
+        hits = indexer.search(query, k)
         # No source found: nothing to ground an answer on, so neither
         # PyTorch nor the model is loaded.
         if hits:
@@ -511,6 +556,7 @@ class RagCLI:
             student_search_results_path: JSON file written by search_dataset.
             dataset_path: JSON file with the correct sources
                 (AnsweredQuestions).
+
             k: Largest k for which recall is reported.
             show_failed: List every question not found within the first k
                 results, with its text.

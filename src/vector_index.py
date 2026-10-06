@@ -1,61 +1,89 @@
-from typing import TYPE_CHECKING
+"""Semantic index over the corpus chunks (bonus 1).
+
+Each chunk is split into windows of about ``MAX_WINDOW_SIZE`` characters
+and every window becomes a vector with a small static embedding model.
+A chunk scores as its best window, so a long chunk is not diluted by the
+average of unrelated parts. The index is built by the ``index`` command
+next to the BM25 index and saved as two ``.npy`` files, plus the model
+itself (``StaticEncoder``), so a search needs nothing else.
+"""
+from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
+from tqdm import tqdm
 
-from .exceptions import RagError
+from .exceptions import (IndexNotFoundError, PathError,
+                         VectorIndexError)
 from .models import Chunk, WindowChunk
+from .static_encoder import StaticEncoder
 from .tokenizer_bm import Tokenizer
-
-if TYPE_CHECKING:
-    # Only for mypy: importing it for real would load PyTorch at start-up.
-    from sentence_transformers import SentenceTransformer
 
 
 class VectorIndex:
+    """Scores every chunk by meaning, with one vector per window.
+
+    Always created complete: from chunks with ``build`` or from disk with
+    ``load``; both end in ``__init__`` with the data already computed.
+
+    Attributes:
+        MAX_WINDOW_SIZE: Characters per window; a window is closed when
+            the next line would go over it (see the README tuning table).
+        MODEL_NAME: Embedding model, the same for chunks and questions.
+        BATCH_SIZE: Windows embedded at a time by ``build`` (one step of
+            the progress bar).
+        VECTOR_NAME: File with the window vectors inside the index folder.
+        OWNERS_NAME: File with the chunk id of each window.
+    """
+
     MAX_WINDOW_SIZE = 400
     MODEL_NAME = "minishlab/potion-base-8M"
+    BATCH_SIZE = 512
 
-    def __init__(self, vectors: np.ndarray, owners: np.ndarray) -> None:
+    VECTOR_NAME = "vectors.npy"
+    OWNERS_NAME = "owners.npy"
+
+    def __init__(self, vectors: NDArray[np.float32],
+                 owners: NDArray[np.intp]) -> None:
+        """Store an already computed index.
+
+        Use ``build`` or ``load`` instead of calling this directly.
+
+        Args:
+            vectors: One normalised vector per window, shape
+                ``(windows, dimensions)``.
+            owners: Chunk id of each window, shape ``(windows,)``; a chunk
+                id is the chunk's position in the list given to ``build``.
+        """
         self._vectors = vectors
         self._owners = owners
-        self._model: "SentenceTransformer | None" = None
+        self._model: StaticEncoder | None = None
+
+    @property
+    def chunk_count(self) -> int:
+        """Number of chunks the windows belong to (highest owner + 1)."""
+        return int(self._owners.max()) + 1
 
     @classmethod
-    def _load_model(cls) -> "SentenceTransformer":
-        """Load the embedding model, from the local cache first.
+    def _load_model(cls) -> StaticEncoder:
+        """Load the embedding model from the Hugging Face cache.
 
-        Same idea as ``Generator._from_pretrained``: with the model cached
-        no request is sent to the Hugging Face Hub (a request that never
-        answers would hang the command); the Hub is only used for the
-        first download.
+        Only ``build`` needs it: ``load`` reads the copy saved with the
+        index. The tests replace this method with a fake model.
 
         Returns:
-            The model, on CPU.
+            The model (see ``StaticEncoder.from_pretrained``).
 
         Raises:
             RagError: The model is not cached and cannot be downloaded.
         """
-        from sentence_transformers import SentenceTransformer
+        return StaticEncoder.from_pretrained(cls.MODEL_NAME)
 
-        try:
-            return SentenceTransformer(cls.MODEL_NAME, device="cpu",
-                                       local_files_only=True)
-        except OSError:
-            pass
-        try:
-            return SentenceTransformer(cls.MODEL_NAME, device="cpu")
-        except OSError as e:
-            raise RagError(
-                f"Cannot load {cls.MODEL_NAME}: it is not in the local "
-                f"cache and the download failed ({e}). Check the internet "
-                "connection, or HF_HOME if the model is cached elsewhere."
-            ) from e
-
-    def _encoder(self) -> "SentenceTransformer":
+    def _encoder(self) -> StaticEncoder:
         """The embedding model, loaded the first time it is needed.
 
-        An index read with ``load`` has no model until the first query;
-        later queries (every question of ``search_dataset``) reuse it.
+        ``build`` and ``load`` already set it; this is only a fallback for
+        an index created directly with ``__init__``.
 
         Returns:
             The loaded model.
@@ -66,6 +94,19 @@ class VectorIndex:
 
     @classmethod
     def _get_window(cls, text: str) -> list[str]:
+        """Split a text into windows made of whole lines.
+
+        Lines are added to the current window until the next one would
+        make it longer than ``MAX_WINDOW_SIZE``. A single line longer than
+        that becomes a window of its own, so joining the windows gives
+        back the original text.
+
+        Args:
+            text: The text of one chunk.
+
+        Returns:
+            The windows in order; empty for an empty text.
+        """
         window_list: list[str] = []
         window_text: str = ""
         for line in text.splitlines(keepends=True):
@@ -81,6 +122,18 @@ class VectorIndex:
 
     @classmethod
     def _window_chunk(cls, chunks: list[Chunk]) -> list[WindowChunk]:
+        """Build the texts to embed: the windows of every chunk.
+
+        Each window starts with the words of its file path (tokenized like
+        BM25 does), which helps code questions that name a module.
+
+        Args:
+            chunks: The chunks to index.
+
+        Returns:
+            One ``WindowChunk`` per chunk, in the same order, so its
+            position is the chunk id.
+        """
         tokenizer = Tokenizer()
         window_chunk_list: list[WindowChunk] = []
         for chunk in chunks:
@@ -97,19 +150,127 @@ class VectorIndex:
 
     @classmethod
     def build(cls, chunks: list[Chunk]) -> "VectorIndex":
+        """Build the index by embedding every window once.
+
+        Windows are embedded ``BATCH_SIZE`` at a time, with a progress bar.
+        The model stays loaded in the new index, so a search right after
+        ``build`` does not load it again, and ``save`` writes it too.
+
+        Args:
+            chunks: The chunks to index, in the same order as the BM25
+                index (chunk ids must match).
+
+        Returns:
+            The new index, ready to search.
+
+        Raises:
+            RagError: The embedding model cannot be loaded.
+        """
         window_chunks = cls._window_chunk(chunks)
         counts = [item.windows_count for item in window_chunks]
         owners = np.repeat(np.arange(len(window_chunks)), counts)
         texts = [window for item in window_chunks for window in item.windows]
 
         model = cls._load_model()
-        vectors = model.encode(
-            texts,
-            batch_size=512,
-            normalize_embeddings=True,
-            show_progress_bar=True
-        )
+        batches = [texts[i:i + cls.BATCH_SIZE]
+                   for i in range(0, len(texts), cls.BATCH_SIZE)]
+        vectors = np.concatenate(
+            [model.encode(batch) for batch in tqdm(
+                batches, desc="Embedding windows", unit="batch")]
+            or [np.zeros((0, 0), dtype=np.float32)])
 
         index = cls(vectors, owners)
         index._model = model
         return index
+
+    @classmethod
+    def load(cls, files_dir: Path) -> "VectorIndex":
+        """Read an index saved by ``save``, without recomputing anything.
+
+        ``.npy`` files keep their shape and type, so there is no pydantic
+        validation; the shapes are checked by hand instead.
+
+        Args:
+            files_dir: Folder given to ``save``.
+
+        Returns:
+            The same index that was saved, with the model saved next to
+            it (no Hugging Face cache, no network, no PyTorch).
+
+        Raises:
+            IndexNotFoundError: A vector or model file is missing
+                (``index`` was never run for this folder, or with an older
+                version).
+            PathError: A file exists but cannot be read.
+            VectorIndexError: A file is not valid or the arrays do not
+                fit together.
+        """
+        try:
+            vectors = np.load(files_dir / cls.VECTOR_NAME)
+            owners = np.load(files_dir / cls.OWNERS_NAME)
+        except FileNotFoundError as e:
+            raise IndexNotFoundError(files_dir) from e
+        except OSError as e:
+            raise PathError(files_dir, e) from e
+        except ValueError as e:
+            raise VectorIndexError("cannot read the vector files. Run 'index' "
+                                   "again") from e
+
+        if (owners.ndim != 1
+            or vectors.ndim != 2
+                or len(vectors) != len(owners)):
+            raise VectorIndexError("the data are corrupted. Run 'index' "
+                                   "again")
+
+        index = cls(vectors, owners)
+        index._model = StaticEncoder.load(files_dir)
+        return index
+
+    def save(self, files_dir: Path) -> None:
+        """Write the index as ``VECTOR_NAME`` and ``OWNERS_NAME``, and the
+        model next to them (``StaticEncoder.save``).
+
+        The folder is created if needed and a previous index is replaced.
+
+        Args:
+            files_dir: Folder where the index is saved (the same as the
+                BM25 index).
+
+        Raises:
+            PathError: The folder or a file cannot be written.
+            RagError: The tokenizer cannot be written.
+        """
+        try:
+            files_dir.mkdir(parents=True, exist_ok=True)
+
+            vectors_path = files_dir / self.VECTOR_NAME
+            owners_path = files_dir / self.OWNERS_NAME
+
+            np.save(vectors_path, self._vectors)
+            np.save(owners_path, self._owners)
+            self._encoder().save(files_dir)
+        except OSError as e:
+            raise PathError(files_dir, e) from e
+
+    def chunk_score(self, query: str) -> NDArray[np.float64]:
+        """Score every chunk by its similarity to the query.
+
+        The query is embedded as it is (removing stopwords made results
+        worse). Vectors are normalised, so the dot product is the cosine
+        similarity; each chunk keeps the score of its best window.
+
+        Args:
+            query: Free text.
+
+        Returns:
+            One score per chunk id, shape ``(chunk_count,)``, from -1 to 1;
+            higher is better.
+
+        Raises:
+            RagError: The embedding model cannot be loaded.
+        """
+        query_vector = self._encoder().encode([query])[0]
+        scores = self._vectors @ query_vector
+        best = np.full(self.chunk_count, -1.0)
+        np.maximum.at(best, self._owners, scores)
+        return best

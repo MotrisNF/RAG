@@ -213,3 +213,16 @@ class DatasetEvaluationError(EvaluationError):
 class ResultsEvaluationError(EvaluationError):
     """The search results are not valid (repeated question, too many
     sources, impossible or too long range)."""
+
+
+class VectorIndexError(RagError):
+    """The saved vector index cannot be used (unreadable file or arrays
+    that do not fit together)."""
+
+    def __init__(self, error: str) -> None:
+        """Prefix the problem so the user knows which index failed.
+
+        Args:
+            error: What is wrong, ending with what to do.
+        """
+        super().__init__(f"Vector index error: {error}")

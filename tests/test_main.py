@@ -100,7 +100,11 @@ class TestSearch:
     @pytest.fixture
     def index_dir(self, tmp_path: Path,
                   capsys: pytest.CaptureFixture[str]) -> Path:
-        """A small saved index (its build progress bar is discarded)."""
+        """A small saved BM25 index (its build progress bar is discarded).
+
+        No vector index (it would load the embedding model), so the
+        searches use ``--retriever bm25``.
+        """
         chunks = [Chunk(file_path=f"data/raw/{i}.md",
                         first_character_index=10 * i,
                         last_character_index=10 * i + len(text), text=text)
@@ -111,9 +115,13 @@ class TestSearch:
 
     def search(self, runner: Runner, index_dir: Path,
                *args: str) -> tuple[int, StudentSearchResults, str]:
-        """Run ``search`` and parse its stdout as StudentSearchResults."""
+        """Run ``search`` and parse its stdout as StudentSearchResults.
+
+        The fixture saves only the BM25 index, so ``--retriever bm25``.
+        """
         code, out, err = runner.run_full("search", *args,
-                                         "--index_dir", str(index_dir))
+                                         "--index_dir", str(index_dir),
+                                         "--retriever", "bm25")
         return code, StudentSearchResults.model_validate_json(out), err
 
     def test_output_is_student_search_results(self, runner: Runner,
@@ -142,7 +150,8 @@ class TestSearch:
                                      index_dir: Path) -> None:
         """Only the subject's fields: no text, no score."""
         code, out, _ = runner.run_full("search", "lora",
-                                       "--index_dir", str(index_dir))
+                                       "--index_dir", str(index_dir),
+                                       "--retriever", "bm25")
         source = json.loads(out)["search_results"][0]["retrieved_sources"][0]
         assert set(source) == {"file_path", "first_character_index",
                                "last_character_index"}

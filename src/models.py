@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 # How ``Generator`` loads the model (``answer --dtype``). Defined here, not
 # in ``generator``, so the CLI can use it without importing torch.
 DtypeMode = Literal["auto", "float32", "bfloat16"]
+RetrieverMode = Literal["bm25", "hybrid"]
 
 # Answer when retrieval finds no source: the model is not run, since with no
 # context it could only answer from its own knowledge. Here for the same
@@ -159,11 +160,15 @@ class SearchHit(BaseModel):
 
     Attributes:
         chunk: The matching chunk.
-        score: BM25 score; higher is better.
+        score: Search score; higher is better (BM25, or the combined
+            score of the hybrid search).
+        chunk_id: Position of the chunk in the index's chunk list; the
+            BM25 and vector indexes share it.
     """
 
     chunk: Chunk
     score: float
+    chunk_id: int
 
 
 class IndexData(BaseModel):
@@ -254,5 +259,13 @@ class EvaluationInform:
 
 
 class WindowChunk(BaseModel):
+    """The texts embedded for one chunk by the vector index.
+
+    Attributes:
+        windows: Each window of the chunk, with the file path words in
+            front.
+        windows_count: Number of windows (``len(windows)``).
+    """
+
     windows: list[str]
     windows_count: int

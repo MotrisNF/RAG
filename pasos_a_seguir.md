@@ -35,7 +35,7 @@ Consejo: un commit al terminar cada paso que funcione.
 - Parte obligatoria **completa** (commit "Ended the mandatory part of the proyect."). Recall@5 con BM25: docs **0.870**, code **0.758**. `make test` (1049 tests, ~20 s, nunca carga Qwen) y `make lint` limpios antes de empezar los bonus.
 - Bonus en curso: **1 (embeddings) y 2 (híbrido)**. Después, por orden recomendado: 4 (caché), 5 (API HTTP), 3 (indexado incremental, el más caro).
 - Antes de los bonus 4 y 5 se recomendó sacar la lógica de los comandos a una capa de servicio y crear una clase base `Retriever`.
-- `src/vector_index.py`: pasos 1–3 hechos (ventanas, prefijo de ruta, `build`, carga del modelo sin red). Faltan `save`/`load`, `chunk_scores` y `HybridRetriever`.
+- `src/vector_index.py`: pasos 1–3 hechos (ventanas, prefijo de ruta, `build`, carga del modelo sin red). `save`/`load` (paso 4), `chunk_score` (paso 5) y `HybridRetriever` en `src/hybrid_retriever.py` (paso 6) hechos, y conectados a la CLI (paso 7). Paso 8: recall medido (docs 0.910, code 0.828 @5); `test_limits` pasa; falta la comparación con `bm25`.
 - `data/processed/vectors.npy` es una prueba anterior, **no** el formato final (una fila por chunk, sin ventanas). Se puede sobrescribir.
 - `test_embedding.py` (raíz) es un script de prueba del usuario; usa `minishlab/potion-base-8M`.
 - Modelos en la caché de Hugging Face: solo `minishlab/potion-base-8M` y `Qwen/Qwen3-0.6B` (los demás probados se borraron).
@@ -161,27 +161,32 @@ Diferencias conocidas con la implementación del usuario: su `_get_window` no de
 - [x] Orden de imports: librería estándar, luego terceros (`numpy`), luego los del proyecto.
 - [x] (Opcional) `counts` con `item.windows_count`.
 
-## Paso 4 — Guardar y cargar
+## Paso 4 — Guardar y cargar ✅
 
-Métodos que quedan en `VectorIndex`: `save` y `load` (este paso) y `chunk_scores` (paso 5). La reordenación híbrida va en **otra clase** (paso 6).
+Métodos que quedan en `VectorIndex`: `chunk_score` (paso 5). La reordenación híbrida va en **otra clase** (paso 6).
 
-- [ ] `save(index_dir)`: `np.save` de `vectors.npy` y `owners.npy` en la misma carpeta que `index.json`. Capturar `OSError` → `PathError`, como `BM25Index.save`.
-- [ ] `load(index_dir)` (`@classmethod`): `np.load` de los dos. Errores claros:
+- [x] `save(files_dir)`: `np.save` de `vectors.npy` y `owners.npy` en la misma carpeta que `index.json` (crea la carpeta si falta). `OSError` → `PathError`, como `BM25Index.save`.
+- [x] `load(files_dir)` (`@classmethod`): `np.load` de los dos. Con `.npy` no hay `model_validate_json` (numpy ya devuelve el array con su forma y tipo), así que las formas se comprueban a mano:
   - falta algún fichero → `IndexNotFoundError` ("run `index` first");
   - no se puede leer → `PathError`;
-  - formas incoherentes (`len(vectors) != len(owners)`, no es 2D…) → `DatasetError` o un error propio.
-- [ ] Constantes con los nombres de fichero (`VECTORS_FILE`, `OWNERS_FILE`), como `FILE_NAME` en `BM25Index`.
-- [ ] **Comprobar**: guardar y cargar → `np.array_equal` en los dos arrays.
+  - fichero corrupto / no es `.npy` (`ValueError`) → `VectorIndexError`;
+  - formas incoherentes (`owners` no es 1D, `vectors` no es 2D, `len` distintos; `ndim` antes que `len`) → `VectorIndexError`.
+- [x] Error propio `VectorIndexError(RagError)` en `exceptions.py` (`DatasetError` no sirve: necesita un `ValidationError` de pydantic).
+- [x] Constantes con los nombres de fichero: `VECTOR_NAME = "vectors.npy"`, `OWNERS_NAME = "owners.npy"`.
+- [x] **Comprobado** (2026-10-06, arrays inventados, sin el modelo): guardar y cargar → `np.array_equal` `True` en los dos (`float32` se conserva); carpeta sin índice → `IndexNotFoundError`; `owners` de otra longitud → `VectorIndexError`; `vectors.npy` con basura → `VectorIndexError`.
+- [x] Docstrings de `load`, `save` y `VectorIndexError`.
 
-## Paso 5 — Puntuar los chunks con una pregunta
+## Paso 5 — Puntuar los chunks con una pregunta ✅
 
 - [x] Dónde vive el modelo: `_load_model()` (de la caché local primero, sin red) y `_encoder()` (lo carga la primera vez y lo guarda en `self._model`). `build` deja el modelo ya cargado en el índice.
-- [ ] `chunk_scores(query) -> np.ndarray`:
-  1. `query_vector = model.encode([query], normalize_embeddings=True)[0]` (pregunta **tal cual**).
+- [x] `chunk_score(query) -> np.ndarray` (el usuario lo llamó en singular; usar este nombre en el paso 6):
+  1. `query_vector = self._encoder().encode([query], normalize_embeddings=True)[0]` (pregunta **tal cual**; el `[0]` pasa de `(1, 256)` a `(256,)`).
   2. `scores = self._vectors @ query_vector` (una puntuación por ventana).
-  3. `best = np.full(n_chunks, -1.0)` y `np.maximum.at(best, self._owners, scores)` (una por chunk).
-- [ ] `n_chunks` = `self._owners.max() + 1` (o guardarlo).
-- [ ] **Comprobar**: `best` tiene una puntuación por chunk, entre −1 y 1.
+  3. `best = np.full(self._owners.max() + 1, -1.0)` y `np.maximum.at(best, self._owners, scores)` (una por chunk).
+- [x] **Comprobado** (2026-10-06):
+  - con un modelo falso y el ejemplo de abajo → `[0.71, 0.35, 0.48]`, forma `(3,)`;
+  - con el modelo real y 3 chunks inventados → una puntuación por chunk, todas entre −1 y 1; "How do I install vLLM?" elige `docs/installation.md` y "default temperature for sampling" elige `vllm/sampling_params.py`.
+- [x] Docstring de `chunk_score`.
 
 ### Cómo se asignan las puntuaciones (paso 5), con un ejemplo
 
@@ -224,19 +229,25 @@ Resultado: `best = [0.71, 0.35, 0.48]`, la puntuación de cada chunk es la de su
 
 `n_chunks` es `self._owners.max() + 1` (aquí 2 + 1 = 3).
 
-## Paso 6 — Reordenar los resultados de BM25 (bonus 2)
+## Paso 6 — Reordenar los resultados de BM25 (bonus 2) ✅
 
-- [ ] Una clase aparte, `HybridRetriever` (en `vector_index.py` o en su propio `src/hybrid_retriever.py`), **no** dentro de `VectorIndex`: necesita los dos índices, y así `VectorIndex` no depende de `BM25Index`. Cada clase hace una cosa: BM25 busca por palabras, `VectorIndex` puntúa por significado y `HybridRetriever` combina.
-- [ ] `__init__(bm25, vectors)`: guarda los dos índices.
-- [ ] Comprobar que coinciden: el mayor número de `owners` debe ser el número de chunks de BM25 menos uno. Si no, uno de los dos se reconstruyó sin el otro → error claro ("run `index` again").
-- [ ] Constantes de clase: `CANDIDATES = 30`, `ALPHA = 0.5` (comentario que remita al README).
-- [ ] `search(query, k) -> list[SearchHit]`, la **misma** firma que `BM25Index.search`, para que los comandos usen uno u otro sin más cambios:
-  1. `hits = bm25.search(query, CANDIDATES)`.
-  2. Para cada candidato: `(1 − ALPHA) × hit.score / mejor score BM25 + ALPHA × best[id del chunk]`.
-  3. Ordenar de mayor a menor y devolver los `k` primeros como `SearchHit` (con la puntuación combinada).
-- [ ] El id de cada chunk: su posición en la lista de chunks del índice BM25 (los dos índices se construyen con la **misma** lista y en el mismo orden).
-- [ ] Sin resultados de BM25 → lista vacía (como ahora).
-- [ ] **Comprobar**: con `ALPHA = 0` el orden es **exactamente** el de BM25.
+- [x] Clase aparte `HybridRetriever` en `src/hybrid_retriever.py`, **no** dentro de `VectorIndex`: necesita los dos índices, y así `VectorIndex` no depende de `BM25Index`. BM25 busca por palabras, `VectorIndex` puntúa por significado y `HybridRetriever` combina.
+- [x] `__init__(bm25, vector)`: guarda los dos índices en `self._bm25` y `self._vector`.
+- [x] Propiedad pública `chunk_count` en `BM25Index` y `VectorIndex` (los atributos `_owners` / `_n_chunks` son privados).
+- [x] Comprueba que coinciden: `vector.chunk_count != bm25.chunk_count` → `VectorIndexError` ("Run 'index' again").
+- [x] Constantes de clase: `CANDIDATES = 30`, `ALPHA = 0.5`.
+- [x] `search(query, k) -> list[SearchHit]`, la **misma** firma que `BM25Index.search`:
+  1. `hits = self._bm25.search(query, CANDIDATES)`; vacío → `[]` (sin calcular `chunk_score`).
+  2. Para cada hit: `(1 − ALPHA) × hit.score / hits[0].score + ALPHA × best[hit.chunk_id]`.
+  3. `hit.model_copy(update={"score": combined})` (no modifica el hit de BM25), ordenar de mayor a menor (`sort` es estable: los empates mantienen el orden de BM25) y devolver los `k` primeros.
+- [x] El id de cada chunk: `SearchHit.chunk_id` (opción A), rellenado en `BM25Index.search`.
+- [x] **Comprobado** (2026-10-06, script en el scratchpad):
+  - ejemplo de abajo (BM25 falso) → orden 2, 7, 9 con 0.760 / 0.650 / 0.600; `k = 2` → 2, 7;
+  - `ALPHA = 0` → **exactamente** el orden de BM25 (BM25 real, 3 preguntas); `ALPHA = 1` → orden solo por la similitud;
+  - sin resultados de BM25 → `[]`; índices de distinto tamaño → `VectorIndexError`; el hit original de BM25 no cambia;
+  - BM25 + `VectorIndex` reales con 10 chunks inventados → resultados con sentido;
+  - `make lint` (flake8 + mypy) limpio.
+- [ ] (Paso 9) Docstrings de `HybridRetriever` y anotar `scored_hits: list[SearchHit]`.
 
 ### Cómo se combinan las puntuaciones (paso 6), con un ejemplo
 
@@ -260,41 +271,135 @@ En código:
 
 ```
 hits = bm25.search(query, CANDIDATES)          # list[SearchHit], ya ordenados
-best = vectors.chunk_scores(query)             # una puntuación por chunk
+best = vectors.chunk_score(query)             # una puntuación por chunk
 top_bm25 = hits[0].score                       # la mayor (la primera)
 combined = [(1 - ALPHA) * hit.score / top_bm25 + ALPHA * best[id del chunk] for hit in hits]
 ```
 
 y ordenar los `hits` por `combined`, de mayor a menor, quedándose con los `k` primeros. El "id del chunk" es su posición en la lista de chunks de BM25 (paso 6, punto anterior).
 
-**Ojo: hoy `SearchHit` no lleva el id del chunk** (solo `chunk` y `score`), y `BM25Index.search` lo tiene dentro (`chunk_id`) pero no lo devuelve. Opciones:
+**Hecho (opción A): `SearchHit.chunk_id`**, rellenado en `BM25Index.search`. Antes `SearchHit` no llevaba el id del chunk (solo `chunk` y `score`), y `BM25Index.search` lo tiene dentro (`chunk_id`) pero no lo devuelve. Opciones:
 - añadir un campo `chunk_id: int` a `SearchHit` y rellenarlo en `BM25Index.search` (lo más limpio: un dato que ya existe, sin buscarlo después);
 - o, en `HybridRetriever`, un diccionario `{id(chunk): posición}` hecho una vez en `__init__` (funciona, pero depende de que sean los mismos objetos).
 
-## Paso 7 — Conectarlo a la CLI
+## Paso 7 — Conectarlo a la CLI ✅
 
-- [ ] `index`: después de BM25, construir y guardar el `VectorIndex` en la misma `--index_dir`.
-- [ ] `search`, `search_dataset`, `answer`: opción `--retriever` con `Literal["bm25", "hybrid"]` (un tipo compartido en `models.py`, como `DtypeMode`, para no importar torch en la CLI).
-- [ ] Por defecto: `hybrid` si el paso 8 confirma la mejora.
-- [ ] `sentence_transformers` solo se importa cuando se usa `hybrid` (carga perezosa).
-- [ ] Índice antiguo sin vectores + `--retriever hybrid` → error claro ("run `index` again").
+- [x] `index`: después de BM25, `VectorIndex.build(chunks)` + `save` en la misma `--index_dir`, con **los mismos chunks en el mismo orden**. `index` **no** tiene `--retriever`: siempre construye los dos.
+- [x] `search`, `search_dataset`, `answer`: opción `--retriever` con `RetrieverMode = Literal["bm25", "hybrid"]` en `models.py` (como `DtypeMode`). `answer_dataset` no busca (lee los resultados de `search_dataset`): sin cambios.
+- [x] Un solo sitio que elige: `RagCLI._load_retriever(index_dir, retriever) -> BM25Index | HybridRetriever`. `_search_question` recibe `indexer: BM25Index | HybridRetriever`. (La clase base `Retriever` y la capa de servicio, más adelante, antes de los bonus 4 y 5.)
+- [x] Por defecto: `hybrid` (si el paso 8 no confirma la mejora, cambiar a `bm25`).
+- [x] `sentence_transformers` solo se importa al cargar el modelo (`VectorIndex._load_model`): `bm25` no lo carga nunca.
+- [x] Índice antiguo sin `vectors.npy` + `--retriever hybrid` → `IndexNotFoundError` ("Run 'index' first").
+- [x] Tests de la CLI (`test_cli_parsing.py`, `TestSearch` de `test_main.py`): guardan solo BM25, así que usan `--retriever bm25`. `make lint` limpio y 1049 tests pasan (2026-10-06).
+- [ ] (Paso 9) Los tests de `index` ahora cargan el modelo de embeddings real: `make test` pasa de ~57 s a ~86 s. Sustituirlo por un modelo falso (monkeypatch de `VectorIndex._load_model`).
 
-## Paso 8 — Medir
+## Paso 8 — Medir ✅
 
-- [ ] `make test_rag_base` (o moulinette) con `--retriever hybrid`: debería dar **docs ≈ 0.91, code ≈ 0.83** en recall@5. Si sale distinto, algún paso no coincide con lo medido.
-- [ ] `make test_limits`: indexado muy por debajo de 5 min y 200 preguntas por debajo de 90 s.
-- [ ] Con `--retriever bm25`: los números de siempre (0.870 / 0.758).
+- [x] `make test_rag_base` con `hybrid` (por defecto), 2026-10-06, en casa: **idéntico al experimento**.
 
-## Paso 9 — Tests y documentación
+  | Dataset | @1 | @3 | @5 | @10 | BM25 @5 |
+  |---|---|---|---|---|---|
+  | docs | 0.640 | 0.870 | **0.910** | 0.920 | 0.870 |
+  | code | 0.545 | 0.778 | **0.828** | 0.859 | 0.758 |
 
-- [ ] Tests **sin el modelo real**: un objeto falso con un método `encode` que devuelva vectores inventados.
-  - ventanas (casos del paso 1);
-  - prefijo de la ruta y orden de `owners`;
-  - máximo por chunk;
-  - `ALPHA = 0` → igual que BM25;
-  - guardar y cargar;
-  - errores de `load` (falta fichero, formas incoherentes).
-- [ ] Docstrings en todo `vector_index.py`.
-- [ ] `make lint` y `make test` limpios.
-- [ ] README: System architecture (componente nuevo), Retrieval method (reordenación), opciones de la CLI (`--retriever`), cambiar el "(to implement)" de la tabla de mejoras por ✅ con los números reales.
-- [ ] DEVLOG: un Step nuevo con lo hecho y lo medido.
+  Tiempos: `index` **19.6 s** (vectores ~4 s, 117 lotes); `search_dataset` **9.2 s** docs + **9.4 s** code (incluye arrancar el proceso y cargar el modelo de embeddings, ~6 s; cada pregunta ~0.01 s).
+- [x] Comprobado contra el subject: `hybrid` **puede quedarse por defecto** (umbrales: indexado ≤ 5 min, 200 preguntas ≤ 90 s, recall@5 ≥ 0.80 docs / 0.50 code; el subject no obliga a que el retriever por defecto sea léxico). Salvedad: con `hybrid`, `index` necesita el modelo de embeddings en la caché o internet para descargarlo la primera vez (como Qwen para `answer`).
+- [x] `make test_limits` (2026-10-06, en casa, `hybrid`): indexado **28.2 s** / 300 s ✅; recuperación **199 preguntas en 19.4 s** / 90 s ✅ (~13 preguntas/s). En el campus (~3×): ~85 s y ~58 s, dentro de los límites. Repetir allí si es posible.
+- [x] Con `--retriever bm25` (2026-10-06): docs 0.610 / 0.830 / **0.870** / 0.920, code 0.515 / 0.717 / **0.758** / 0.818: los de siempre. `search_dataset` ~2 s frente a ~9 s con `hybrid` (la diferencia es cargar PyTorch y el modelo una vez; cada pregunta ~7 ms: encode 0.4, matmul 2, `maximum.at` 4).
+- [ ] Batería (`make test_answer`) con `hybrid`: 04–10 vistas; 07 sale **al revés** (❌, antes 🟡) aunque los chunks de `kv_cache_coordinator.py` están arriba (sensibilidad de Qwen 0.6B a la mezcla de chunks). Falta ver 01–03. Batería 521 s frente a 190 s: el híbrido solo suma ~6 s por `answer`; repetir una pregunta con `--retriever bm25` para ver si el resto es memoria del PC.
+
+## Paso 9 — Tests y documentación ✅
+
+- [x] `tests/conftest.py`: fixture `autouse` que cambia `VectorIndex._load_model` por `FakeEncoder` (bolsa de palabras con hash fijo, huecos en caché, `np.add.at`) en **todos** los tests. `make test` ya no carga el modelo de embeddings: **1093 tests en ~60 s**.
+- [x] `tests/test_vector_index.py`: ventanas (casos del paso 1), prefijo de la ruta y orden de `owners`, máximo por chunk (ejemplo del paso 5), guardar/cargar, errores de `load` (falta fichero, basura, formas incoherentes), carpeta no escribible.
+- [x] `tests/test_hybrid_retriever.py`: fórmula (ejemplo del paso 6), `k`, `CANDIDATES`, `ALPHA = 0` → igual que BM25, `ALPHA = 1` → orden por similitud, solo candidatos de BM25, empates, sin resultados, índices que no coinciden.
+- [x] Docstrings de `HybridRetriever` (y `scored_hits: list[SearchHit]`).
+- [x] `make lint` y `make test` limpios. (`from conftest import FakeEncoder`, no `tests.conftest`: si no, mypy ve el fichero con dos nombres.)
+- [x] README: descripción y estado, opciones (`--retriever`), arquitectura (diagrama + `VectorIndex` / `HybridRetriever`), Retrieval method (*Vector re-ranking*), resultados actuales (hybrid y bm25), tiempos, evolución, tabla de mejoras (✅), tests, decisiones de diseño.
+- [x] DEVLOG: Step 21.
+
+## Siguiente
+
+- Bonus por orden recomendado: 4 (caché), 5 (API HTTP), 3 (indexado incremental). Antes de 4 y 5: capa de servicio y clase base `Retriever` (sustituye a `BM25Index | HybridRetriever`).
+- Pendiente menor: el aviso "unauthenticated requests to the HF Hub" al cargar el modelo de embeddings (¿hace alguna petición aunque esté en caché?).
+
+---
+
+# Bonus 4 — Caché (plan del 2026-10-06)
+
+Subject: *"Caching: cache the index and query results to speed up cold start and repeated queries."* Dos partes: **arranque en frío** (cargar menos y más rápido) y **preguntas repetidas** (no volver a buscar). Cuenta solo si funciona y se puede demostrar: medir antes y después.
+
+## Dónde se va el tiempo hoy (medido)
+
+| Qué | Tiempo | Cuándo |
+|---|---|---|
+| Arrancar `uv` + Python + importar `src.commands` | ~0.25 s | siempre |
+| Cargar `index.json` (leer 0.45 + validar con pydantic 0.38) | ~0.8 s | siempre |
+| Importar `sentence_transformers` + cargar `potion-base-8M` | **~6.5 s** | `hybrid`, primera pregunta |
+| Cada pregunta (vectorizar + producto + máximo) | ~7 ms | `hybrid` |
+| `answer`: Qwen | ~5.6 s de carga + ~20 s por respuesta | `answer` |
+
+Lo que más pesa con diferencia es `sentence_transformers` (importa PyTorch). Prueba hecha: el modelo es **estático** (`tokenizer.json` + una tabla `(29528, 256)` en `model.safetensors`, y luego media + normalizar). Con solo `tokenizers` + numpy da **los mismos vectores** (diferencia máx. 1.5e-8) y carga en **0.65 s** en vez de 6.5 s.
+
+## Fase 0 — Terminar `Retriever` ✅
+
+- [x] `Retriever(ABC)` con `search` abstracto, en `src/base_retriever.py`. `BM25Index` y `HybridRetriever` heredan de él; `VectorIndex` no (no tiene `search`). `commands.py` usa `Retriever` en `_load_retriever` y `_search_question`.
+- [x] `make lint-strict` limpio, 1093 tests.
+- [ ] Test: `Retriever()` → `TypeError`; `BM25Index` y `HybridRetriever` son subclases (con los tests de la fase 1).
+
+## Fase 1 — Arranque en frío: modelo de embeddings sin PyTorch ✅ (falta quitar la dependencia)
+
+Idea: la "caché del índice". `index` copia lo que el modelo necesita **dentro de `--index_dir`**, y las búsquedas lo leen de ahí con numpy, sin `sentence_transformers` ni la caché de Hugging Face.
+
+- [x] 1.1 `StaticEncoder` (`src/static_encoder.py`): `from_pretrained` (caché primero, descarga solo si falta, `RagError` claro) y `encode(texts)` (media de `table[ids]`, normalizado, texto sin tokens → ceros). Comprobado con las 59 828 ventanas reales: **igual que `vectors.npy`** (diferencia máx. 9e-8). Carga en 0.27 s.
+- [x] 1.2 `save` / `load`: `embeddings.npy` + `tokenizer.json`. `tokenizers` lanza `Exception` (error de Rust) al leer/escribir mal: capturado aparte. Comprobado: ida y vuelta idéntica; falta fichero → `IndexNotFoundError`; basura → `VectorIndexError`; tabla no 2D → `VectorIndexError`; carpeta no escribible → `PathError`.
+- [x] 1.3 `VectorIndex` usa `StaticEncoder`: fuera `sentence_transformers` y `TYPE_CHECKING`; `_load_model` → `StaticEncoder.from_pretrained`; `build` por lotes de `BATCH_SIZE = 512` con tqdm ("Embedding windows"); `save` guarda también el modelo; `load` lo carga del índice.
+- [x] Docstrings de `StaticEncoder` y `VectorIndex` al día.
+- [x] Tests: `FakeEncoder` del `conftest` sin `normalize_embeddings` y con `save` (marca `fake_encoder.txt`; el `StaticEncoder.load` parcheado devuelve el falso solo en esas carpetas). Nuevo `tests/test_static_encoder.py` (23 tests) con un tokenizer `WordLevel` de 5 palabras y una tabla conocida: media, normalizado, `[UNK]`, texto vacío, guardar/cargar, errores, `from_pretrained` (caché, descarga, sin red), y `Retriever` (abstracta, subclases). **1116 tests**, `make lint-strict` limpio.
+- [x] Medido sin tocar `data/processed` (copia del índice + modelo guardado al lado): `_load_retriever("hybrid")` + primera pregunta = **1.1–1.6 s** (antes ~7.3 s: 0.8 BM25 + 6.5 `sentence_transformers`). **PyTorch no se importa.**
+- [ ] 1.4 Dependencias: `sentence-transformers` ya no se usa en `src/` ni en `tests/` → `uv remove sentence-transformers` (sigue haciendo falta `torch`/`transformers` para Qwen).
+- [x] 1.5 Medido con el índice real (2026-10-06, `make test_limits` + `evaluate`):
+
+  | | Antes (`sentence-transformers`) | Ahora (`StaticEncoder`) |
+  |---|---|---|
+  | `index` | 28.2 s | **13.2 s** (vectorizar: 117 lotes en 4 s) |
+  | 199 preguntas (2 procesos) | 19.4 s | **5.4 s** (82 y 68 preguntas/s) |
+  | Recall@5 docs / code | 0.910 / 0.828 | **0.910 / 0.828** (todos los k idénticos) |
+
+  `data/processed` ahora tiene `index.json`, `vectors.npy`, `owners.npy`, `embeddings.npy`, `tokenizer.json`.
+- [x] ~~(Opcional) `encode` sin bucle~~: no hace falta, vectorizar el corpus dentro de `index` tarda 4 s (los 7.5 s medidos antes eran con la máquina cargada).
+
+## Fase 2 — Preguntas repetidas: `CachedRetriever`
+
+Un `Retriever` que envuelve a otro (patrón *decorator*): BM25 y el híbrido no cambian.
+
+- [ ] `CachedRetriever(Retriever)` en `src/cached_retriever.py`:
+  - `__init__(load_inner, cache_path, namespace)`: `load_inner` es una función que carga el retriever de verdad **solo cuando hace falta** → si todas las preguntas están en caché, **no se carga ningún índice ni modelo**;
+  - `search(query, k)`: clave = `sha256(namespace + k + query)`; si está, devuelve los hits guardados; si no, carga el interno (una vez), busca, guarda.
+- [ ] `namespace` = qué retriever + sus parámetros (`CANDIDATES`, `ALPHA`, `MODEL_NAME`) + la **huella del índice** (`st_size` y `st_mtime_ns` de `index.json` y `vectors.npy`). Reindexar o cambiar α invalida la caché sola: nunca resultados viejos.
+- [ ] En disco: `index_dir/query_cache.json`, modelo pydantic `QueryCache(namespace: str, entries: dict[str, list[SearchHit]])`. Al abrir: no existe, otro `namespace` o fichero roto → empezar vacía (**nunca** un error: la caché es una ayuda, no un requisito). Guardar al final del comando (no por pregunta) y de forma atómica (fichero temporal + `os.replace`). `index` la borra.
+- [ ] Tamaño: guardar solo `chunk_id` + `score` y rehacer los `SearchHit` con los chunks de BM25 (más pequeño), **o** el `SearchHit` entero (más simple, ~4 MB por 200 preguntas). Empezar por lo simple y medir.
+- [ ] CLI: `_load_retriever` devuelve `CachedRetriever(...)`. Opción `--cache` (`True` por defecto) en `search`, `search_dataset` y `answer` para poder enseñar la diferencia (`--cache False`). Documentar en `--help`.
+- [ ] **Comprobar**:
+  - resultados con caché == sin caché (mismo JSON de `search_dataset`, mismo recall);
+  - `search_dataset` docs: 1.ª vez ~9 s, 2.ª vez objetivo < 1 s; `search` repetido: sin cargar índices;
+  - `index` de nuevo → la caché no se usa (cambió la huella);
+  - `make test_limits` sigue pasando la primera vez (sin caché).
+- [ ] Tests: hit/miss, el interno no se carga si todo está en caché, otra `k` u otro retriever = otra entrada, huella distinta → caché vacía, fichero roto → caché vacía, guardar/cargar, carpeta no escribible → avisa pero el comando funciona.
+
+## Fase 3 (opcional) — Caché de respuestas de `answer`
+
+La pregunta repetida que más cuesta es `answer` (~25 s). Misma idea: clave = pregunta + `k` + retriever + huella + versión del prompt (`MAX_CONTEXT_TOKENS`, `MAX_NEW_TOKENS`, `Generator.MODEL_NAME`). Hit → no se carga PyTorch ni Qwen: ~25 s → < 1 s. Decidir después de la fase 2 si vale la pena (el subject habla de *query results*; esto es un extra fácil de demostrar).
+
+## Fase 4 — Demostración, medidas y documentación
+
+- [ ] Regla `make test_cache`: `search_dataset` dos veces (fría y caliente) y `search` repetido, imprimiendo los tiempos.
+- [ ] README: arquitectura (`StaticEncoder`, `CachedRetriever`, ficheros nuevos en `data/processed`), opción `--cache`, tabla de tiempos antes/después, tabla de mejoras, decisiones (decorator, huella del índice, caché que nunca rompe el comando).
+- [ ] DEVLOG: Step 22.
+- [ ] `make lint-strict`, `make test`, `make test_limits`, `make test_rag_base` (0.910 / 0.828) limpios.
+
+## Qué NO hacer
+
+- `pickle` para la caché o el índice: cargar un pickle ejecuta código; el proyecto ya eligió JSON + pydantic por eso.
+- `functools.lru_cache` en `search`: solo vive dentro de un proceso, y cada comando de la CLI es un proceso nuevo (servirá para el bonus 5, la API, que sí se queda abierta: `CachedRetriever` con su diccionario en memoria ya lo cubre).
+- Cambiar el formato de `index.json` para ganar 0.8 s: con la fase 2, una pregunta en caché ni siquiera lo carga.
