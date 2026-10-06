@@ -546,6 +546,7 @@ class TestPyChunkerRealCorpus:
         (measured: ~59 % against ~33 % at 2000).
         """
         def share(chunker: FixedSizeChunker) -> float:
+            """Fraction of the ``.py`` chunks that start at a definition."""
             starts = total = 0
             for doc in docs:
                 if not doc.file_path.endswith(".py"):

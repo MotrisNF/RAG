@@ -654,6 +654,18 @@ Cache file: ~3.7 MB for 100 questions with k = 10 (whole `SearchHit`s, chunk tex
 - A static method can read other classes' constants (`BM25Index.K1`) without any instance.
 - `os.replace` is atomic: either the old file or the new one, never half of each.
 
+## Step 24 — Bonus 5: choosing the HTTP framework (2026-10-06)
+
+**Decision:** FastAPI + uvicorn, not the standard library's `http.server`.
+
+**Why**
+- **It fits the existing code.** The project already describes every input and output with pydantic models. FastAPI validates requests and serialises responses with those same models, so the API returns exactly the JSON the CLI writes (`StudentSearchResults`, `StudentSearchResultsAndAnswer`) without building it by hand.
+- **Less code of my own, fewer places to get wrong.** Routing, request parsing, validation (automatic 422 errors) and status codes come with the framework. With `http.server` all of that would be hand-written.
+- **Easy to demonstrate.** `/docs` gives an interactive page to try every endpoint from the browser during the defense.
+- **Cost:** two dependencies (`fastapi`, `uvicorn`), allowed by the subject ("you may use any library you like"), plus `httpx` for the tests (`fastapi.testclient`).
+
+**Plan:** a `RagApi` class (`src/api.py`) that keeps the retriever and the generator loaded between requests, and a `serve` command that starts it on `127.0.0.1` by default.
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
@@ -768,7 +780,7 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [x] Semantic embeddings (`potion-base-8M` instead of MiniLM: time limit) and hybrid retrieval (re-ranking instead of reciprocal rank fusion): Step 21.
 - [x] `Retriever` base class (Step 22).
 - [x] Caching: cold start (Step 22, model with numpy) and query-result cache (Step 23, `CachedRetriever`).
-- [ ] Local HTTP API, then incremental indexing.
+- [ ] Local HTTP API (Step 24: FastAPI + uvicorn), then incremental indexing.
 
 **Final**
 - [ ] Edge cases, timings, README, `.gitignore` uncommented before delivery (no `data/`, PDF, `guia/`).

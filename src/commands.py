@@ -203,12 +203,18 @@ class RagCLI:
             k: Annotated[int, Field(gt=0)] = 10,
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
             retriever: RetrieverMode = "hybrid",
-            cache: bool = True
+            cache: bool = True,
+            save_directory: Annotated[
+                str,
+                Field(min_length=1)
+                ] = "data/output/search_results/SingleQuestions"
             ) -> None:
-        """Print the top-k sources for a single question, as JSON.
+        """Print the top-k sources for a single question, and save them.
 
         The output is a StudentSearchResults with one entry, the same
-        format search_dataset writes, so both commands behave alike.
+        format search_dataset writes, so both commands behave alike. The
+        JSON goes to stdout (so it can be piped) and to a file named after
+        the question id; where it was saved goes to stderr.
 
         Args:
             query: The question to search for.
@@ -219,6 +225,8 @@ class RagCLI:
             cache: Reuse the results of questions already searched with
                 the same index and retriever (``--cache=False`` to search
                 again).
+            save_directory: Folder where the StudentSearchResults file is
+                written, as ``<question_id>.json``.
         """
         indexer = self._load_retriever(index_dir, retriever, cache)
         question = UnansweredQuestion(question=query)
@@ -228,6 +236,9 @@ class RagCLI:
         )
         indexer.flush()
         print(results.model_dump_json(indent=2))
+        path = self._save_json(save_directory,
+                               f"{question.question_id}.json", results)
+        print(f"File saved in '{path}'", file=sys.stderr)
 
     @staticmethod
     def _build_retriever(index_dir: str,
@@ -289,6 +300,35 @@ class RagCLI:
             RagCLI._cache_namespace(index_dir, retriever),
             CachedRetriever.file_path(Path(index_dir), retriever)
         )
+
+    @staticmethod
+    def _save_json(save_directory: str, file_name: str,
+                   output: BaseModel) -> Path:
+        """Write a command's output as JSON, creating the folder if needed.
+
+        Shared by the four commands that save results, so the write and
+        its error are handled in one place.
+
+        Args:
+            save_directory: Folder where the file is written.
+            file_name: Name of the file inside that folder.
+            output: The model to save (StudentSearchResults or
+                StudentSearchResultsAndAnswer).
+
+        Returns:
+            The path of the written file.
+
+        Raises:
+            PathError: The folder cannot be created or the file written.
+        """
+        try:
+            Path(save_directory).mkdir(parents=True, exist_ok=True)
+            path = Path(save_directory) / file_name
+            path.write_text(output.model_dump_json(indent=2),
+                            encoding="utf-8")
+        except OSError as e:
+            raise PathError(save_directory, e) from e
+        return path
 
     @staticmethod
     def _open_file_save(path: Path, model: type[M]) -> M:
@@ -432,13 +472,7 @@ class RagCLI:
             results_list.append(self._search_question(indexer, question, k))
         indexer.flush()
         output = StudentSearchResults(search_results=results_list, k=k)
-        try:
-            Path(save_directory).mkdir(parents=True, exist_ok=True)
-            path = Path(save_directory) / dataset_path.name
-            path.write_text(output.model_dump_json(indent=2),
-                            encoding="utf-8")
-        except OSError as e:
-            raise PathError(save_directory, e) from e
+        path = self._save_json(save_directory, dataset_path.name, output)
         print(f"File saved in '{path}'")
 
     @CliCommand.validated
@@ -449,9 +483,17 @@ class RagCLI:
             index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
             retriever: RetrieverMode = "hybrid",
             dtype: DtypeMode = "auto",
-            cache: bool = True
+            cache: bool = True,
+            save_directory: Annotated[
+                str,
+                Field(min_length=1)
+                ] = "data/output/search_results_and_answer/SingleQuestions"
             ) -> None:
         """Answer a single question using the retrieved sources as context.
+
+        The StudentSearchResultsAndAnswer JSON goes to stdout (so it can be
+        piped) and to a file named after the question id; where it was
+        saved goes to stderr.
 
         Args:
             query: The question to answer.
@@ -466,6 +508,8 @@ class RagCLI:
             cache: Reuse the results of questions already searched with
                 the same index and retriever (``--cache=False`` to search
                 again).
+            save_directory: Folder where the StudentSearchResultsAndAnswer
+                file is written, as ``<question_id>.json``.
         """
 
         # The index first: its errors show up before PyTorch is imported.
@@ -498,10 +542,12 @@ class RagCLI:
                 ) for hit in hits],
             answer=answer
         )
-        print(
-            StudentSearchResultsAndAnswer(
-                search_results=[answered],
-                k=k).model_dump_json(indent=2))
+        output = StudentSearchResultsAndAnswer(search_results=[answered],
+                                               k=k)
+        print(output.model_dump_json(indent=2))
+        path = self._save_json(save_directory,
+                               f"{answered.question_id}.json", output)
+        print(f"File saved in '{path}'", file=sys.stderr)
 
     @CliCommand.validated
     def answer_dataset(
@@ -538,13 +584,8 @@ class RagCLI:
         output = StudentSearchResultsAndAnswer(
             search_results=results_list,
             k=results.k)
-        try:
-            Path(save_directory).mkdir(parents=True, exist_ok=True)
-            path = Path(save_directory) / student_search_results_path.name
-            path.write_text(output.model_dump_json(indent=2),
-                            encoding="utf-8")
-        except OSError as e:
-            raise PathError(save_directory, e) from e
+        path = self._save_json(save_directory,
+                               student_search_results_path.name, output)
         print(f"File saved in '{path}'")
 
     def _answer_all(self, results: StudentSearchResults,

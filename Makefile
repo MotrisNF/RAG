@@ -34,7 +34,7 @@ debug:
 	uv run python -m pdb -m src $(ARGS)
 
 lint:
-	uv run -m flake8 && uv run -m mypy \
+	uv run -m flake8 . && uv run -m mypy \
 	--warn-return-any \
 	--warn-unused-ignores \
 	--ignore-missing-imports \
@@ -43,7 +43,7 @@ lint:
 	.
 
 lint-strict:
-	uv run -m flake8 && uv run -m mypy --strict .
+	uv run -m flake8 . && uv run -m mypy --strict .
 
 test:
 	uv run pytest

@@ -120,13 +120,13 @@ uv run -m src <command> --help               # options of a command
 | Command | Options (default) | Output |
 |---|---|---|
 | `index` | `--max_chunk_size` (2000, at most 2000) · `--raw_dir` (`data/raw`) · `--index_dir` (`data/processed`) | The BM25 index (`index.json`), the vector index (`vectors.npy`, `owners.npy`) and the embedding model (`embeddings.npy`, `tokenizer.json`). Removes the query caches of the previous index |
-| `search <query>` | `--k` (10) · `--index_dir` · `--retriever` (`hybrid` \| `bm25`) · `--cache` (`True`) | `StudentSearchResults` JSON on stdout |
+| `search <query>` | `--k` (10) · `--index_dir` · `--retriever` (`hybrid` \| `bm25`) · `--cache` (`True`) · `--save_directory` (`data/output/search_results/SingleQuestions`) | `StudentSearchResults` JSON on stdout and in `<question_id>.json` |
 | `search_dataset` | `--dataset_path` (required) · `--k` (10) · `--save_directory` (`data/output/search_results/UnansweredQuestions`) · `--index_dir` · `--retriever` · `--cache` | `StudentSearchResults` JSON, with the same file name as the dataset |
-| `answer <query>` | `--k` (10) · `--index_dir` · `--retriever` · `--dtype` (`auto` \| `float32` \| `bfloat16`) · `--cache` | `StudentSearchResultsAndAnswer` JSON on stdout |
+| `answer <query>` | `--k` (10) · `--index_dir` · `--retriever` · `--dtype` (`auto` \| `float32` \| `bfloat16`) · `--cache` · `--save_directory` (`data/output/search_results_and_answer/SingleQuestions`) | `StudentSearchResultsAndAnswer` JSON on stdout and in `<question_id>.json` |
 | `answer_dataset` | `--student_search_results_path` (required) · `--save_directory` (`data/output/search_results_and_answer/UnansweredQuestions`) · `--dtype` | `StudentSearchResultsAndAnswer` JSON, with the same file name as the input |
 | `evaluate` | `--student_search_results_path` (required) · `--dataset_path` (required, an `AnsweredQuestions` file) · `--k` (10) · `--show_failed` | recall@1/3/5/10 report |
 
-- Progress bars and status messages go to stderr, so you can redirect or pipe the JSON printed by `search` and `answer` (`> out.json`, `| jq`).
+- `search` and `answer` print their JSON on stdout and also save it as `<save_directory>/<question_id>.json`. Progress bars and status messages, including where the file was saved, go to stderr, so you can still redirect or pipe the JSON (`> out.json`, `| jq`).
 - Put boolean flags such as `--show_failed` after the paths, or write them as `--show_failed=True`. Otherwise Fire reads the next word as the flag's value.
 - `--dtype` and `--retriever` only accept the listed values. Any other value is rejected with a clear argument error.
 - `--cache` is on by default: searches already made with the same index and retriever are read from `<index_dir>/query_cache_<retriever>.json`. Turn it off with `--cache=False`.
@@ -220,7 +220,7 @@ $ uv run -m src search "How do I load a LoRA adapter?" --k 5
 $ uv run -m src search "How do I load a LoRA adapter?" --k 5 --retriever bm25
 ```
 
-Each command prints a `StudentSearchResults` JSON with the 5 best sources: file path and character range. Run the same search again and it is read from the query cache, without loading any index. `--cache=False` searches again:
+Each command prints a `StudentSearchResults` JSON with the 5 best sources (file path and character range), saves it under `data/output/search_results/SingleQuestions/`, and says where on stderr. Run the same search again and it is read from the query cache, without loading any index. `--cache=False` searches again:
 
 ```console
 $ uv run -m src search "How do I load a LoRA adapter?" --k 5 --cache=False
@@ -230,7 +230,7 @@ $ uv run -m src search "How do I load a LoRA adapter?" --k 5 --cache=False
 $ uv run -m src answer "What is the minimum version of bitsandbytes required for vLLM quantization?"
 ```
 
-This prints a `StudentSearchResultsAndAnswer` JSON whose answer is *"The minimum version of bitsandbytes required for vLLM quantization is 0.46.1."*
+This prints a `StudentSearchResultsAndAnswer` JSON, also saved under `data/output/search_results_and_answer/SingleQuestions/`, whose answer is *"The minimum version of bitsandbytes required for vLLM quantization is 0.46.1."*
 
 - A question about a flag that does not exist (`--turbo-mode`), or one unrelated to the codebase ("What is the capital of France?"), gets the fixed refusal: *"The context does not contain the answer."*
 - A query that matches nothing (`"???"`, or only stopwords) gets *"No relevant sources were found in the corpus."* without loading the model.
@@ -626,7 +626,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 
 ### Tests
 
-`make test` runs **1,150 pytest tests** in ~30 s. It never loads Qwen or the embedding model: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test.
+`make test` runs **1,151 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
 
 - **Chunkers:** exact offsets, no gaps or overlaps, never above the maximum, always progressing. These are checked on random texts and on the whole real corpus. Separator priorities, whole code blocks and decorators are tested too.
 - **BM25:** scores compared with a naive reference implementation of the formula, plus tie-breaking, query stopwords and the save/load round trip.

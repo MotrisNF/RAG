@@ -1,8 +1,10 @@
-"""Shared test setup: no test loads the real embedding model.
+"""Shared test setup: no test loads the real embedding model, and no
+test writes into the project's ``data/output``.
 
 ``VectorIndex._load_model`` is replaced for every test by ``FakeEncoder``,
 so ``index`` and the hybrid search run in milliseconds and without
-the Hugging Face cache.
+the Hugging Face cache. Outputs saved to a relative folder (the defaults
+of ``search`` and ``answer``) go under the test's ``tmp_path`` instead.
 """
 import functools
 import re
@@ -12,7 +14,9 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 import pytest
+from pydantic import BaseModel
 
+from src.commands import RagCLI
 from src.static_encoder import StaticEncoder
 from src.vector_index import VectorIndex
 
@@ -107,3 +111,23 @@ def fake_encoder(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeEncoder]:
                         classmethod(lambda cls: encoder))
     monkeypatch.setattr(StaticEncoder, "load", classmethod(load))
     yield encoder
+
+
+@pytest.fixture(autouse=True)
+def outputs_in_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Send outputs saved to a relative folder under ``tmp_path``.
+
+    ``search`` and ``answer`` save by default to ``data/output/...``;
+    without this, every test that runs them would leave a file in the
+    project. Absolute folders (``tmp_path`` given by a test) are kept.
+    """
+    real_save = RagCLI._save_json
+
+    def save(save_directory: str, file_name: str,
+             output: BaseModel) -> Path:
+        """Save as usual, moving a relative folder into ``tmp_path``."""
+        if not Path(save_directory).is_absolute():
+            save_directory = str(tmp_path / save_directory)
+        return real_save(save_directory, file_name, output)
+
+    monkeypatch.setattr(RagCLI, "_save_json", staticmethod(save))

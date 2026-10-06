@@ -9,7 +9,8 @@
 | Parte obligatoria | ✅ completa (recall@5 con `bm25`: docs 0.870, code 0.758) |
 | Bonus 1 (embeddings) + 2 (híbrido) | ✅ por defecto `--retriever hybrid`: docs **0.910**, code **0.828** |
 | Bonus 4 (caché) | ✅ fases 0, 1 y 2 (`CachedRetriever` en disco, `--cache`). Fase 3 (caché de `answer`) opcional, sin decidir |
-| Bonus 5 (API HTTP), bonus 3 (indexado incremental) | pendientes |
+| Bonus 5 (API HTTP) | **en curso**: decidido FastAPI + uvicorn; ahora 5.1 |
+| Bonus 3 (indexado incremental) | pendiente |
 | Cierre (`.gitignore`, repaso README, defensa) | pendiente |
 
 Estimación dada al usuario: lleva un **75–80 %** del proyecto (obligatoria ~65 % + bonus 1/2 ~10 % + mitad del bonus 4).
@@ -21,6 +22,8 @@ Estimación dada al usuario: lleva un **75–80 %** del proyecto (obligatoria ~6
 - Modelos (potion y Qwen) siempre descargados de antemano en la máquina de la defensa: la descarga en `index` no es un riesgo.
 
 **Bonus 4 fase 2 terminada (2026-10-06, sin commit):** 2.2 (disco), 2.3 (CLI) y 2.4 (tests, medidas, README, DEVLOG Step 23). Un fichero de caché por retriever (`query_cache_{bm25,hybrid}.json`). Medido en casa: `search_dataset` docs 1.94 s → 0.32 s; `test_retrieval` 4.4 s → 0.7 s; recall idéntico. **1150 tests**, `make lint-strict` limpio. Siguiente: decidir fase 3 o pasar al bonus 5 (API HTTP).
+
+**Después (2026-10-06):** `search` y `answer` también guardan su JSON en `--save_directory` (por defecto `data/output/search_results/SingleQuestions` y `data/output/search_results_and_answer/SingleQuestions`) como `<question_id>.json`; el JSON sigue en stdout y "File saved in" va a stderr. `RagCLI._save_json` compartido por los cuatro comandos. `conftest.py` redirige las salidas relativas a `tmp_path` (los tests no ensucian `data/output`). Revisión contra el subject hecha: 38 entradas degeneradas sin traceback; `flake8 .` en el Makefile; pendiente de cierre: sacar de git `en.subject.pdf`, DEVLOG, `pasos_a_seguir.md`, `.vscode/` y `dataset_mini_3.json` (sin uso). 1151 tests.
 
 **Mensaje de commit propuesto:** *Add the on-disk query cache with --cache (bonus 4)*
 
@@ -466,7 +469,7 @@ print('loads =', len(loads), ' searches =', len(searches))
 - [x] `CachedRetriever` en memoria; la prueba da `0` / `1` / `3` (2026-10-06). `mypy --strict` limpio. Fichero ya renombrado a `src/cached_retriever.py`; comprobar que tiene salto de línea final (flake8 W292).
 - [ ] `make lint-strict` limpio (docstrings al final de la fase, como siempre).
 
-### Paso 2.2 — Guardar en disco, con la huella del índice (el usuario está aquí)
+### Paso 2.2 — Guardar en disco, con la huella del índice ✅
 
 **Para qué:** que la caché sobreviva entre comandos (cada comando de la CLI es un proceso nuevo) sin devolver **nunca** resultados de un índice viejo o de otra configuración.
 
@@ -561,3 +564,48 @@ La pregunta repetida que más cuesta es `answer` (~25 s). Misma idea: clave = pr
 - `pickle` para la caché o el índice: cargar un pickle ejecuta código; el proyecto ya eligió JSON + pydantic por eso.
 - `functools.lru_cache` en `search`: solo vive dentro de un proceso, y cada comando de la CLI es un proceso nuevo (servirá para el bonus 5, la API, que sí se queda abierta: `CachedRetriever` con su diccionario en memoria ya lo cubre).
 - Cambiar el formato de `index.json` para ganar 0.8 s: con la fase 2, una pregunta en caché ni siquiera lo carga.
+
+---
+
+# Bonus 5 — API HTTP local (plan del 2026-10-06)
+
+Subject: *"Local HTTP API: expose querying the index and answering questions over a small local HTTP API, so the system can be driven by something other than the CLI."* Cuenta solo si funciona y se puede demostrar.
+
+## Decisión: FastAPI + uvicorn (2026-10-06)
+
+Elegido por el usuario frente a `http.server` (librería estándar). Motivos:
+- **Encaja con el código que ya hay:** FastAPI valida la entrada y serializa la salida con los modelos pydantic del proyecto (`StudentSearchResults`, `StudentSearchResultsAndAnswer`): las respuestas tienen exactamente el mismo formato que la CLI, sin escribir JSON a mano.
+- **Menos código propio y menos sitios donde equivocarse:** rutas, parseo, validación (422 automático) y códigos de error vienen hechos; con `http.server` habría que escribirlos.
+- **Demostrable:** `/docs` (Swagger) permite probar la API desde el navegador en la defensa.
+- Coste: dos dependencias (`fastapi`, `uvicorn`); el subject permite cualquier librería. Para los tests, `fastapi.testclient` (necesita `httpx`, dependencia de desarrollo).
+
+## Diseño
+
+- Clase `RagApi` en `src/api.py` (100 % OOP): guarda el retriever y el `Generator`, y registra sus métodos como rutas sobre un `FastAPI` en `__init__`.
+- Comando `serve --host 127.0.0.1 --port 8000 --index_dir --retriever --cache` en `RagCLI`: crea `RagApi` y llama a `uvicorn.run`. **Local:** por defecto solo `127.0.0.1`.
+- El servidor es **un proceso que se queda abierto**: el retriever se carga una vez (con `CachedRetriever` en memoria entre peticiones) y Qwen se carga en la **primera** petición a `/answer`, no al arrancar.
+- Mismas reglas que la CLI: nunca un traceback; `RagError` → respuesta HTTP con su mensaje.
+
+## Pasos
+
+### 5.1 — Dependencias y esqueleto que arranca
+- [ ] `uv add fastapi uvicorn` y `uv add --dev httpx`.
+- [ ] `src/api.py`: `RagApi` con `GET /health` → `{"status": "ok"}`.
+- [ ] Comando `serve` en `RagCLI` (`uvicorn.run(api.app, host=..., port=...)`).
+- [ ] Prueba: `uv run -m src serve` + `curl http://127.0.0.1:8000/health`; `/docs` en el navegador.
+
+### 5.2 — `GET /search`
+- [ ] Parámetros `query` (no vacía) y `k` (> 0) validados por FastAPI; reutilizar `RagCLI._search_question`. Respuesta: `StudentSearchResults`.
+- [ ] El retriever se crea al arrancar con `_load_retriever` (con caché, no carga nada hasta la primera pregunta nueva).
+- [ ] Cuándo llamar a `flush()`: decidir (tras cada búsqueda nueva o al apagar el servidor).
+
+### 5.3 — `POST /answer`
+- [ ] Cuerpo con `query` y `k`; respuesta `StudentSearchResultsAndAnswer`. Sin fuentes → `NO_SOURCES` sin cargar Qwen.
+- [ ] `Generator` cargado una vez, la primera vez que hace falta. FastAPI atiende las rutas síncronas en varios hilos: un `threading.Lock` alrededor de la generación (un solo modelo).
+
+### 5.4 — Errores
+- [ ] `RagError` → JSON `{"detail": "<mensaje>"}` con el código adecuado (índice que falta → 503, entrada mala → 400/422). Nunca un 500 con traceback.
+
+### 5.5 — Tests, medidas y documentación
+- [ ] `tests/test_api.py` con `TestClient` (sin Qwen: `Generator` falso).
+- [ ] README (instrucciones de `serve`, ejemplos con `curl`, arquitectura, decisiones) y DEVLOG (Step 24).

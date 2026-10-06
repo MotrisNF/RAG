@@ -1,3 +1,4 @@
+"""The common interface of every retriever: ``search`` and ``flush``."""
 from abc import ABC, abstractmethod
 from .models import SearchHit
 

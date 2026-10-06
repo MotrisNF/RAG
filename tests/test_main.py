@@ -126,16 +126,33 @@ class TestSearch:
 
     def test_output_is_student_search_results(self, runner: Runner,
                                               index_dir: Path) -> None:
-        """stdout is exactly one valid StudentSearchResults JSON."""
+        """stdout is exactly one valid StudentSearchResults JSON; stderr
+        only says where it was saved."""
         code, results, err = self.search(runner, index_dir, "lora adapter",
                                          "--k", "2")
         assert code == 0
-        assert err == ""
+        assert err.startswith("File saved in '") and err.count("\n") == 1
         assert results.k == 2
         [entry] = results.search_results
         assert entry.question == "lora adapter"
         assert [s.file_path for s in entry.retrieved_sources] == [
             "data/raw/0.md", "data/raw/2.md"]
+
+    def test_saved_file_matches_stdout(self, runner: Runner,
+                                       index_dir: Path,
+                                       tmp_path: Path) -> None:
+        """The file in ``--save_directory`` is named after the question id
+        and holds the same JSON as stdout."""
+        out_dir = tmp_path / "out"
+        code, results, err = self.search(runner, index_dir, "lora adapter",
+                                         "--save_directory", str(out_dir))
+        assert code == 0
+        [entry] = results.search_results
+        path = out_dir / f"{entry.question_id}.json"
+        assert f"File saved in '{path}'" in err
+        saved = StudentSearchResults.model_validate_json(
+            path.read_text(encoding="utf-8"))
+        assert saved == results
 
     def test_sources_keep_character_range(self, runner: Runner,
                                           index_dir: Path) -> None:
