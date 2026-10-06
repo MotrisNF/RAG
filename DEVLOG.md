@@ -603,6 +603,26 @@ Patterns found:
 - The answer battery is not a retrieval measure: with the hybrid retriever question 07 came out reversed although its four right chunks were at the top. A 0.6B model reacts to the exact mix of chunks (as in the context-budget sweep). The battery took 521 s against 190 s; the hybrid part only adds ~6 s per `answer` (measured), so the rest was probably memory pressure (`auto` chose bfloat16).
 - Real bugs caught while building it: `self.FILE_NAME` / `self.VECTORS_NAME` copied names in `save`, `owners.ndi`, a `)` that left `chunk_id` outside `SearchHit(...)`, `index` calling `_load_retriever` (load instead of build).
 
+## Step 22 — `Retriever` base class and bonus 4, part 1: the embedding model without PyTorch (2026-10-06) · commit `0885414`
+
+**What**
+- **`make lint-strict`:** `np.ndarray` without type arguments replaced by `NDArray[np.float32]` / `NDArray[np.intp]` / `NDArray[np.float64]`. A test checked `index._model is fake_encoder`: mypy rejected it, and it did not prove what it said (a reload returned the same fake); it now counts the calls to `_load_model`.
+- **`Retriever`** (`src/base_retriever.py`): abstract class with one method, `search(query, k)`. `BM25Index` and `HybridRetriever` inherit it; `VectorIndex` does not (it has no `search`: inheriting made it impossible to instantiate). `_load_retriever` and `_search_question` take a `Retriever` instead of `BM25Index | HybridRetriever`. Only `search` is abstract: `build` / `save` / `load` make no sense for `HybridRetriever`, which stores nothing of its own.
+- **Bonus 4 plan** (caching: *"cache the index and query results to speed up cold start and repeated queries"*). Measured first: a hybrid search spent ~0.25 s starting Python, ~0.8 s loading `index.json` (0.45 read + 0.38 pydantic) and **~6.5 s importing `sentence_transformers` and loading the model**, then ~7 ms per question.
+- **`StaticEncoder`** (`src/static_encoder.py`): `potion-base-8M` is a tokenizer plus a `(29528, 256)` table (`embeddings` in `model.safetensors`); a text is the normalised mean of its tokens' rows. Run with `tokenizers` + numpy: `from_pretrained` (cache first, download once, clean `RagError`), `encode`, `save` / `load` (`embeddings.npy`, `tokenizer.json`). On the 59,828 real windows: **same vectors as `vectors.npy`** (max difference 9e-8). Loads in ~0.3 s.
+- `VectorIndex` uses it: no more `sentence_transformers` or `TYPE_CHECKING` import; `build` embeds by batches of 512 with a tqdm bar ("Embedding windows"); `save` writes the model next to the vectors and `load` reads it from there, so **searching never touches the Hugging Face cache**. `sentence-transformers` removed from the dependencies.
+- **Measured** (`make test_limits`, then `evaluate` on its output): `index` **28.2 s → 13.2 s**, 199 questions **19.4 s → 5.4 s**, recall@1/3/5/10 **identical** (docs 0.910, code 0.828 @5). PyTorch is never imported by `index` or `search`.
+- **Tests:** the `FakeEncoder` of `conftest.py` always normalises and has `save` (a marker file; the patched `StaticEncoder.load` returns the fake only for folders it saved into, so the `StaticEncoder` tests read real files). New `tests/test_static_encoder.py` (23 tests) with a hand-made 5-word `WordLevel` tokenizer and a table of known vectors. Suite: **1,116 tests**, `make lint-strict` clean.
+
+**Why**
+- The model was the cold start: 6.5 s of a ~7.3 s single search, for a model that is only a lookup table and a mean.
+
+**Learned**
+- `tokenizers` raises a plain `Exception` (a Rust error) for a missing or broken file, not `OSError` / `ValueError`: caught on its own, and the file existence checked first so a missing file still gives *"Run 'index' first"*.
+- `np.save` adds `.npy` to any name: the tokenizer must be written with its own `save`, or it becomes `tokenizer.json.npy`.
+- **Removing the averaging loop does not help** (measured three times each, corpus of 7.3 M tokens): loop 1.6 s, `np.add.reduceat` 13–16 s (it first copies every token row, ~7.5 GB moved in batches), a count matrix times the table 1.6 s. Each `table[ids].mean()` already adds in C; the work is the ~1.9 billion additions, not the 59,828 Python iterations. Tokenizing (2.4 s, Rust) is the larger part. Loop kept.
+- Benchmarks on a shared machine jump around (load average 2–5): repeat them and compare within the same run.
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
@@ -715,7 +735,8 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 
 **Bonus** (only once the mandatory part is perfect)
 - [x] Semantic embeddings (`potion-base-8M` instead of MiniLM: time limit) and hybrid retrieval (re-ranking instead of reciprocal rank fusion): Step 21.
-- [ ] Caching, local HTTP API (after a service layer and a `Retriever` base class), incremental indexing.
+- [x] `Retriever` base class (Step 22).
+- [ ] Caching: cold start done (Step 22, model with numpy); query-result cache (`CachedRetriever`) next. Then local HTTP API, incremental indexing.
 
 **Final**
 - [ ] Edge cases, timings, README, `.gitignore` uncommented before delivery (no `data/`, PDF, `guia/`).

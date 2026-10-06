@@ -1,13 +1,32 @@
-# Pasos a seguir: índice de vectores y búsqueda híbrida (bonus 1 y 2)
+# Pasos a seguir: bonus del proyecto RAG
 
-Objetivo medido (README → *Semantic embeddings: tuning `potion-base-8M`*):
-recall@5 **docs 0.870 → 0.910** y **code 0.758 → 0.828**, con unos 3–8 s más de indexado.
+> **Para quien retome esto (otro agente o yo):** lee primero **"Dónde estamos ahora"** justo debajo y luego **"Contexto para quien retome esto"**. Lo que se está haciendo es el **bonus 4, fase 2** (al final del fichero). Bonus 1 y 2: hechos (pasos 0–9, se dejan como historia de cómo se hizo).
 
-Configuración elegida:
+## Dónde estamos ahora (2026-10-06, final de la tarde, en el campus)
+
+| Parte | Estado |
+|---|---|
+| Parte obligatoria | ✅ completa (recall@5 con `bm25`: docs 0.870, code 0.758) |
+| Bonus 1 (embeddings) + 2 (híbrido) | ✅ por defecto `--retriever hybrid`: docs **0.910**, code **0.828** |
+| Bonus 4 (caché) | fase 0 (`Retriever`) ✅, fase 1 (modelo sin PyTorch) ✅, **fase 2 (`CachedRetriever`) en curso: 2.1 ✅, ahora 2.2** |
+| Bonus 5 (API HTTP), bonus 3 (indexado incremental) | pendientes |
+| Cierre (`.gitignore`, repaso README, defensa) | pendiente |
+
+Estimación dada al usuario: lleva un **75–80 %** del proyecto (obligatoria ~65 % + bonus 1/2 ~10 % + mitad del bonus 4).
+
+**Último commit:** `0885414` *Load the embedding model with numpy instead of sentence-transformers*. Después, sin commit: README y DEVLOG (Step 22) al día, este fichero, y lo que el usuario está programando.
+
+**Dónde lo dejó el usuario (paso 2.2):** `CachedRetriever` en memoria terminado y probado en `src/cached_retriever.py` (paso 2.1 ✅). Del paso 2.2 solo ha escrito el **esqueleto de `QueryCache`** en `src/models.py` (sin docstring y sin salto de línea final). Lo siguiente es el `__init__` con `cache_path` y `namespace`, `_read()`, `_changed` en `search` y `save()`: está todo detallado en el paso 2.2, abajo.
+
+**Ojo también:** si en el último commit `VectorIndexError` (`src/exceptions.py`) no tiene docstrings, es que se borraron sin querer: recuperarlos de `git log -p src/exceptions.py` (texto: clase *"The saved vector index cannot be used (unreadable file or arrays that do not fit together)."*; `__init__` *"Prefix the problem so the user knows which index failed."* con `Args: error: What is wrong, ending with what to do.`).
+
+**Si se continúa en casa:** `data/processed` no está en git. Antes de medir nada hay que ejecutar `uv run -m src index` (crea `index.json`, `vectors.npy`, `owners.npy`, `embeddings.npy`, `tokenizer.json`; ~13 s en el campus, menos en casa). En el campus el entorno está en `/sgoinfre` (`UV_PROJECT_ENVIRONMENT=/sgoinfre/students/saperez-/rag-venv`, `HF_HOME=/sgoinfre/students/saperez-/hf`); en casa serán otros, no hace falta tocarlos.
+
+Configuración de la búsqueda híbrida (por si hay que tocarla):
 
 | Qué | Valor |
 |---|---|
-| Modelo | `minishlab/potion-base-8M` (Model2Vec, 30 MB, se carga con `sentence-transformers`) |
+| Modelo | `minishlab/potion-base-8M` (Model2Vec, 30 MB), ejecutado con numpy por `StaticEncoder` y guardado dentro de `data/processed` |
 | Ventanas | ~400 caracteres, por líneas enteras (`>` 400 cierra la ventana) |
 | Texto de cada ventana | `"<palabras de la ruta>\n<ventana>"` |
 | Puntuación de un chunk | la de su **mejor** ventana (máximo) |
@@ -27,18 +46,26 @@ Consejo: un commit al terminar cada paso que funcione.
 - Proyecto **100 % OOP** (nada de funciones sueltas). Placeholders: `pass` = lo implementa una subclase; código pendiente = `raise NotImplementedError("<name> is not implemented yet")`.
 - Si hay erratas en inglés en su código o mensajes, **corregirlas antes** de citarlas en la documentación.
 - Cuando pide que se programe algo es por esfuerzo/beneficio: hacerlo sin sermones, siguiendo la estructura que ya tiene el proyecto. Ahora está programando él estos pasos y pide revisiones: revisar, explicar, y solo tocar el código cuando lo pida.
+- **Cómo le gusta que se le guíe** (funcionó bien en los bonus 1, 2 y 4):
+  - un paso pequeño cada vez, con **para qué sirve** antes del cómo;
+  - un **esqueleto** de la clase con comentarios de lo que va en cada método, y las piezas concretas (la función de numpy, la línea exacta) cuando se atasca;
+  - un **comando de prueba** con la salida esperada al final de cada paso (él lo ejecuta);
+  - al revisar: errores que lo rompen primero, luego lo que da resultados malos sin error, luego detalles; citar `fichero:línea`;
+  - tras cada paso que funciona: marcarlo aquí con lo medido, y decir cuál es el siguiente.
+- Los tests (`tests/`) y la documentación (README, DEVLOG) los suele pedir hechos: escribirlos siguiendo el estilo existente (docstring en cada test, clases por tema).
+- Antes de afirmar que algo es más rápido o igual, **medirlo** (y repetir: la máquina del campus es compartida y los tiempos saltan).
 - **No ejecutar Qwen** salvo que lo pida (tarda ~20 s por pregunta). El modelo de embeddings sí se puede ejecutar: es rápido.
 - Medir cada cambio por separado y documentarlo (README → Performance, DEVLOG).
 
-### Estado del proyecto (2026-10-05)
+### Estado del proyecto (2026-10-06)
 
-- Parte obligatoria **completa** (commit "Ended the mandatory part of the proyect."). Recall@5 con BM25: docs **0.870**, code **0.758**. `make test` (1049 tests, ~20 s, nunca carga Qwen) y `make lint` limpios antes de empezar los bonus.
-- Bonus en curso: **1 (embeddings) y 2 (híbrido)**. Después, por orden recomendado: 4 (caché), 5 (API HTTP), 3 (indexado incremental, el más caro).
-- Antes de los bonus 4 y 5 se recomendó sacar la lógica de los comandos a una capa de servicio y crear una clase base `Retriever`.
-- `src/vector_index.py`: pasos 1–3 hechos (ventanas, prefijo de ruta, `build`, carga del modelo sin red). `save`/`load` (paso 4), `chunk_score` (paso 5) y `HybridRetriever` en `src/hybrid_retriever.py` (paso 6) hechos, y conectados a la CLI (paso 7). Paso 8: recall medido (docs 0.910, code 0.828 @5); `test_limits` pasa; falta la comparación con `bm25`.
-- `data/processed/vectors.npy` es una prueba anterior, **no** el formato final (una fila por chunk, sin ventanas). Se puede sobrescribir.
-- `test_embedding.py` (raíz) es un script de prueba del usuario; usa `minishlab/potion-base-8M`.
-- Modelos en la caché de Hugging Face: solo `minishlab/potion-base-8M` y `Qwen/Qwen3-0.6B` (los demás probados se borraron).
+- **Código** (`src/`): `commands.py` (CLI Fire; `_load_retriever(index_dir, retriever) -> Retriever` elige según `--retriever`), `base_retriever.py` (`Retriever(ABC)` con `search(query, k)` abstracto), `bm25_index.py` (`BM25Index(Retriever)`, `chunk_count`, cada `SearchHit` lleva `chunk_id`), `vector_index.py` (`VectorIndex`: ventanas, `chunk_score`, guarda `vectors.npy` + `owners.npy` + el modelo), `static_encoder.py` (`StaticEncoder`: tokenizer + tabla con numpy, `embeddings.npy` + `tokenizer.json`), `hybrid_retriever.py` (`HybridRetriever(Retriever)`), `exceptions.py` (`VectorIndexError`, etc.).
+- **Tests:** 1116, ~60 s. `tests/conftest.py` cambia el modelo de embeddings por `FakeEncoder` en **todos** los tests (nunca se carga el modelo real ni Qwen). `make lint-strict` limpio.
+- **Medidas actuales** (campus, `make test_limits`): `index` 13.2 s, 199 preguntas 5.4 s; recall@5 docs 0.910 / code 0.828 (`hybrid`), 0.870 / 0.758 (`bm25`).
+- **Documentación al día hasta la fase 1 del bonus 4:** README (arquitectura, tiempos, tablas de mejoras, tests, decisiones) y DEVLOG Step 22.
+- Dependencias: `sentence-transformers` **quitado**; `tokenizers`, `safetensors`, `huggingface-hub` añadidos; `torch` / `transformers` siguen (Qwen).
+- Modelos en la caché de Hugging Face: `minishlab/potion-base-8M` y `Qwen/Qwen3-0.6B`.
+- Orden recomendado de lo que queda: bonus 4 (fases 2–4) → bonus 5 (API HTTP: recibe un `Retriever`, `CachedRetriever` le sirve tal cual) → bonus 3 (indexado incremental, el más caro).
 
 ### Qué dice el subject (y por qué el índice de vectores va dentro de `index`)
 
@@ -347,7 +374,7 @@ Lo que más pesa con diferencia es `sentence_transformers` (importa PyTorch). Pr
 - [x] `make lint-strict` limpio, 1093 tests.
 - [ ] Test: `Retriever()` → `TypeError`; `BM25Index` y `HybridRetriever` son subclases (con los tests de la fase 1).
 
-## Fase 1 — Arranque en frío: modelo de embeddings sin PyTorch ✅ (falta quitar la dependencia)
+## Fase 1 — Arranque en frío: modelo de embeddings sin PyTorch ✅
 
 Idea: la "caché del índice". `index` copia lo que el modelo necesita **dentro de `--index_dir`**, y las búsquedas lo leen de ahí con numpy, sin `sentence_transformers` ni la caché de Hugging Face.
 
@@ -357,7 +384,7 @@ Idea: la "caché del índice". `index` copia lo que el modelo necesita **dentro 
 - [x] Docstrings de `StaticEncoder` y `VectorIndex` al día.
 - [x] Tests: `FakeEncoder` del `conftest` sin `normalize_embeddings` y con `save` (marca `fake_encoder.txt`; el `StaticEncoder.load` parcheado devuelve el falso solo en esas carpetas). Nuevo `tests/test_static_encoder.py` (23 tests) con un tokenizer `WordLevel` de 5 palabras y una tabla conocida: media, normalizado, `[UNK]`, texto vacío, guardar/cargar, errores, `from_pretrained` (caché, descarga, sin red), y `Retriever` (abstracta, subclases). **1116 tests**, `make lint-strict` limpio.
 - [x] Medido sin tocar `data/processed` (copia del índice + modelo guardado al lado): `_load_retriever("hybrid")` + primera pregunta = **1.1–1.6 s** (antes ~7.3 s: 0.8 BM25 + 6.5 `sentence_transformers`). **PyTorch no se importa.**
-- [ ] 1.4 Dependencias: `sentence-transformers` ya no se usa en `src/` ni en `tests/` → `uv remove sentence-transformers` (sigue haciendo falta `torch`/`transformers` para Qwen).
+- [x] 1.4 `uv remove sentence-transformers` (siguen `torch`/`transformers` para Qwen). Commit `0885414`.
 - [x] 1.5 Medido con el índice real (2026-10-06, `make test_limits` + `evaluate`):
 
   | | Antes (`sentence-transformers`) | Ahora (`StaticEncoder`) |
@@ -367,25 +394,152 @@ Idea: la "caché del índice". `index` copia lo que el modelo necesita **dentro 
   | Recall@5 docs / code | 0.910 / 0.828 | **0.910 / 0.828** (todos los k idénticos) |
 
   `data/processed` ahora tiene `index.json`, `vectors.npy`, `owners.npy`, `embeddings.npy`, `tokenizer.json`.
-- [x] ~~(Opcional) `encode` sin bucle~~: no hace falta, vectorizar el corpus dentro de `index` tarda 4 s (los 7.5 s medidos antes eran con la máquina cargada).
+- [x] ~~(Opcional) `encode` sin bucle~~: medido y descartado. Bucle 1.6 s; `np.add.reduceat` 13–16 s (copia las 7.3 M filas antes de sumar); matriz de conteos × tabla 1.6 s. El trabajo son las sumas, no las vueltas de Python. Tokenizar (2.4 s) pesa más.
+- [x] README y DEVLOG (Step 22) al día.
 
-## Fase 2 — Preguntas repetidas: `CachedRetriever`
+## Fase 2 — Preguntas repetidas: `CachedRetriever` (EN CURSO: paso 2.2)
 
-Un `Retriever` que envuelve a otro (patrón *decorator*): BM25 y el híbrido no cambian.
+**Para qué:** si una pregunta ya se buscó, devolver el resultado guardado sin buscar; y si **todas** están en caché, no cargar ni los índices. Objetivo: repetir `search_dataset` pasa de ~3 s a unas décimas; `search` repetido, sin cargar nada.
 
-- [ ] `CachedRetriever(Retriever)` en `src/cached_retriever.py`:
-  - `__init__(load_inner, cache_path, namespace)`: `load_inner` es una función que carga el retriever de verdad **solo cuando hace falta** → si todas las preguntas están en caché, **no se carga ningún índice ni modelo**;
-  - `search(query, k)`: clave = `sha256(namespace + k + query)`; si está, devuelve los hits guardados; si no, carga el interno (una vez), busca, guarda.
-- [ ] `namespace` = qué retriever + sus parámetros (`CANDIDATES`, `ALPHA`, `MODEL_NAME`) + la **huella del índice** (`st_size` y `st_mtime_ns` de `index.json` y `vectors.npy`). Reindexar o cambiar α invalida la caché sola: nunca resultados viejos.
-- [ ] En disco: `index_dir/query_cache.json`, modelo pydantic `QueryCache(namespace: str, entries: dict[str, list[SearchHit]])`. Al abrir: no existe, otro `namespace` o fichero roto → empezar vacía (**nunca** un error: la caché es una ayuda, no un requisito). Guardar al final del comando (no por pregunta) y de forma atómica (fichero temporal + `os.replace`). `index` la borra.
-- [ ] Tamaño: guardar solo `chunk_id` + `score` y rehacer los `SearchHit` con los chunks de BM25 (más pequeño), **o** el `SearchHit` entero (más simple, ~4 MB por 200 preguntas). Empezar por lo simple y medir.
-- [ ] CLI: `_load_retriever` devuelve `CachedRetriever(...)`. Opción `--cache` (`True` por defecto) en `search`, `search_dataset` y `answer` para poder enseñar la diferencia (`--cache False`). Documentar en `--help`.
-- [ ] **Comprobar**:
-  - resultados con caché == sin caché (mismo JSON de `search_dataset`, mismo recall);
-  - `search_dataset` docs: 1.ª vez ~9 s, 2.ª vez objetivo < 1 s; `search` repetido: sin cargar índices;
-  - `index` de nuevo → la caché no se usa (cambió la huella);
-  - `make test_limits` sigue pasando la primera vez (sin caché).
-- [ ] Tests: hit/miss, el interno no se carga si todo está en caché, otra `k` u otro retriever = otra entrada, huella distinta → caché vacía, fichero roto → caché vacía, guardar/cargar, carpeta no escribible → avisa pero el comando funciona.
+**Diseño (patrón *decorator*):** `CachedRetriever` **es** un `Retriever` y **contiene** otro (BM25 o el híbrido), que no cambian. En vez del retriever ya cargado recibe **una función que sabe cargarlo** (`load_inner`), y solo la llama la primera vez que falta una pregunta.
+
+Cuatro pasos: 2.1 la clase en memoria → 2.2 guardar en disco con la huella del índice → 2.3 CLI → 2.4 tests, medidas y docs.
+
+### Paso 2.1 — La clase, solo en memoria ✅
+
+Fichero `src/cached_retriever.py` (ahora se llama `cached_retrived.py`, renombrar). Esqueleto que se le dio:
+
+```python
+from collections.abc import Callable
+
+from .base_retriever import Retriever
+from .models import SearchHit
+
+
+class CachedRetriever(Retriever):
+    def __init__(self, load_inner: Callable[[], Retriever]) -> None:
+        self._load_inner = load_inner              # la función, sin llamarla
+        self._inner: Retriever | None = None       # el retriever, aún sin cargar
+        self._entries: dict[str, list[SearchHit]] = {}
+
+    def _retriever(self) -> Retriever:
+        # si self._inner es None: self._inner = self._load_inner()
+        # devolver self._inner   (misma idea que VectorIndex._encoder)
+
+    @staticmethod
+    def _key(query: str, k: int) -> str:
+        # legible, distingue pregunta Y k: f"{k}:{query}"
+
+    def search(self, query: str, k: int) -> list[SearchHit]:
+        # key = self._key(query, k)
+        # si no está: self._entries[key] = self._retriever().search(query, k)
+        # devolver una COPIA: list(self._entries[key])
+```
+
+- `Callable[[], Retriever]` = función sin argumentos que devuelve un `Retriever`. En la CLI: `CachedRetriever(lambda: self._load_retriever(index_dir, retriever))` (el `lambda` no se ejecuta hasta que alguien lo llama).
+- Devolver una copia: si quien llama cambia la lista, lo guardado no se estropea.
+- No capturar errores aquí: un "Run 'index' first" al cargar tiene que llegar al usuario igual que ahora.
+
+**Prueba que se le dio** (debe salir `created, loads = 0` y luego `loads = 1  searches = 3`):
+
+```bash
+uv run python -c "
+from src.cached_retriever import CachedRetriever
+from src.base_retriever import Retriever
+loads, searches = [], []
+class Fake(Retriever):
+    def search(self, query, k):
+        searches.append(query); return []
+def load():
+    loads.append(1); return Fake()
+c = CachedRetriever(load)
+print('created, loads =', len(loads))
+c.search('lora', 5); c.search('lora', 5); c.search('lora', 10); c.search('cuda', 5)
+print('loads =', len(loads), ' searches =', len(searches))
+"
+```
+
+- [x] `CachedRetriever` en memoria; la prueba da `0` / `1` / `3` (2026-10-06). `mypy --strict` limpio. Fichero ya renombrado a `src/cached_retriever.py`; comprobar que tiene salto de línea final (flake8 W292).
+- [ ] `make lint-strict` limpio (docstrings al final de la fase, como siempre).
+
+### Paso 2.2 — Guardar en disco, con la huella del índice (el usuario está aquí)
+
+**Para qué:** que la caché sobreviva entre comandos (cada comando de la CLI es un proceso nuevo) sin devolver **nunca** resultados de un índice viejo o de otra configuración.
+
+- [ ] **`namespace`** (un `str`) que identifica "qué produjo estos resultados". Se construye en la CLI (paso 2.3) y se pasa a `CachedRetriever`:
+  - el retriever (`bm25` / `hybrid`) y sus parámetros: `HybridRetriever.CANDIDATES`, `ALPHA`, `VectorIndex.MODEL_NAME`;
+  - la **huella del índice**: `st_size` y `st_mtime_ns` de `index.json` y `vectors.npy` (`Path.stat()`, no hay que leer los ficheros: es instantáneo). Reindexar cambia `st_mtime_ns` → caché nueva.
+  - Si falta un fichero del índice, **no** fallar al calcular la huella: dejar que el error salga al cargar el retriever ("Run 'index' first"), como ahora. Por ejemplo, huella `"missing"` para ese fichero.
+- [ ] **Modelo pydantic** en `models.py`: `QueryCache(namespace: str, entries: dict[str, list[SearchHit]])` (el proyecto valida todo lo que lee de disco con pydantic; **no** `pickle`).
+- [ ] `CachedRetriever.__init__(load_inner, cache_path, namespace)`: al crearse, **intenta** leer `cache_path` con `QueryCache.model_validate_json`:
+  - no existe, `namespace` distinto, JSON roto o no válido → empezar con `{}`; **nunca un error** (la caché es una ayuda, no un requisito);
+  - ok → `self._entries = data.entries`.
+- [ ] `save()`: escribe `QueryCache(namespace, entries)` solo si se añadió algo (un atributo `self._changed`). **Atómico:** escribir en `cache_path.with_suffix(".tmp")` y luego `os.replace(tmp, cache_path)` (si el proceso muere a medias, el fichero viejo sigue entero). Si no se puede escribir (`OSError`) → aviso en `stderr` y seguir: el comando ya hizo su trabajo.
+- [ ] Ubicación: `index_dir / "query_cache.json"` (constante `FILE_NAME` en la clase).
+- [ ] Tamaño: guardar el `SearchHit` entero (con el texto del chunk) es lo más simple: ~2 KB por hit → ~4 MB para 200 preguntas con k = 10. Medirlo; si molesta, guardar solo `chunk_id` + `score` (pero entonces la caché necesita los chunks de BM25 para rehacer los hits, y eso obliga a cargar el índice: se pierde la ventaja). **Recomendado: el `SearchHit` entero.**
+
+Esqueleto que se le dio (2.2):
+
+```python
+# models.py  (HECHO el esqueleto; falta docstring)
+class QueryCache(BaseModel):
+    namespace: str
+    entries: dict[str, list[SearchHit]]
+
+# cached_retriever.py
+FILE_NAME = "query_cache.json"
+
+def __init__(self, load_inner: Callable[[], Retriever],
+             cache_path: Path, namespace: str) -> None:
+    # guardar los tres en atributos
+    self._entries = self._read()      # lo que haya en el fichero, o {}
+    self._changed = False             # ¿se añadió algo desde que se leyó?
+
+def _read(self) -> dict[str, list[SearchHit]]:
+    try:
+        text = self._cache_path.read_text(encoding="utf-8")
+        data = QueryCache.model_validate_json(text)
+    except (OSError, ValidationError):     # no existe, ilegible, JSON roto
+        return {}
+    # otro namespace → {} ; el mismo → data.entries
+
+# en search, al guardar: self._changed = True
+
+def save(self) -> None:
+    if not self._changed:
+        return
+    data = QueryCache(namespace=self._namespace, entries=self._entries)
+    tmp = self._cache_path.with_suffix(".tmp")
+    # escribir data.model_dump_json() en tmp, luego os.replace(tmp, self._cache_path)
+    # OSError → aviso en stderr y seguir (sin excepción)
+```
+
+Por qué `.tmp` + `os.replace`: si el proceso se corta escribiendo, queda el fichero viejo entero o el nuevo entero, nunca uno a medias.
+
+**Prueba para el usuario** (dársela cuando termine 2.2): crear un `CachedRetriever` con el `Fake` de 2.1, buscar, `save()`, crear **otro** con el mismo `namespace` → la búsqueda no llama a `load` (`loads = 0`); con otro `namespace` → sí; fichero con basura → empieza vacía, sin error.
+
+### Paso 2.3 — Conectarlo a la CLI
+
+- [ ] `RagCLI._load_retriever(index_dir, retriever, cache)`:
+  - `cache=False` → como ahora;
+  - `cache=True` → `CachedRetriever(lambda: <lo de ahora>, Path(index_dir) / CachedRetriever.FILE_NAME, namespace)`.
+  - La función que construye el `namespace` (huella + parámetros) puede ser un `@staticmethod` de `CachedRetriever` o de `RagCLI`; mejor en `CachedRetriever` (`fingerprint(index_dir, retriever)`), así la CLI no sabe cómo se hace.
+- [ ] `--cache` (`bool`, por defecto `True`) en `search`, `search_dataset` y `answer`, con su línea en `Args` del docstring (sale en `--help`). Para la demo: `--cache False`. Ojo con Fire y los booleanos: `--cache=False` o `--nocache` (ver README → *Every option*: los flags van **después** de los argumentos).
+- [ ] Llamar a `save()` al final de cada comando (después del bucle de `search_dataset`, no por pregunta). Como `_load_retriever` devuelve un `Retriever`, guardar el `CachedRetriever` en una variable con su tipo, o hacer que `save` sea un método de `Retriever` que no hace nada por defecto (más simple en los comandos; decidir con el usuario).
+- [ ] `index` borra `query_cache.json` si existe (la huella ya la invalida, pero así no se queda un fichero viejo de varios MB).
+- [ ] `make cleandata` ya borra `data/processed/*`: comprobar que incluye la caché.
+
+### Paso 2.4 — Tests, medidas y documentación
+
+- [ ] `tests/test_cached_retriever.py` con un retriever falso que cuenta cargas y búsquedas:
+  - hit / miss; el interno **no se carga** si todo está en caché; otra `k` = otra entrada; devuelve copias;
+  - guardar → otra instancia lo lee; otro `namespace` → vacía; JSON roto → vacía; carpeta no escribible → aviso, sin excepción; no escribe si no cambió nada;
+  - la huella cambia si cambia `index.json` (`os.utime` para tocar la fecha);
+  - CLI: `search` dos veces con `--retriever bm25` y la segunda no carga el índice (parchear `BM25Index.load` para contar).
+- [ ] **Medir** (el usuario ejecuta los comandos): `search_dataset` docs con caché fría y caliente; `search` repetido; `--cache False`; `index` de nuevo → la siguiente búsqueda no usa la caché vieja. Comprobar que el JSON de resultados es **idéntico** con y sin caché (`diff`) y que el recall no cambia (0.910 / 0.828).
+- [ ] `make test_limits` sigue pasando (la primera vez es sin caché: `index` la borra).
+- [ ] Docstrings de todo `cached_retriever.py`; `make lint-strict`.
+- [ ] README (arquitectura, opción `--cache`, tiempos antes/después, tabla de mejoras, tests, decisiones) y DEVLOG (Step 23).
 
 ## Fase 3 (opcional) — Caché de respuestas de `answer`
 

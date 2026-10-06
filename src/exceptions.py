@@ -216,8 +216,9 @@ class ResultsEvaluationError(EvaluationError):
 
 
 class VectorIndexError(RagError):
-    """The saved vector index cannot be used (unreadable file or arrays
-    that do not fit together)."""
+    """The saved vector index cannot be used: an unreadable file, arrays
+    that do not fit together, a broken embedding model, or a vector index
+    that does not match the BM25 index."""
 
     def __init__(self, error: str) -> None:
         """Prefix the problem so the user knows which index failed.

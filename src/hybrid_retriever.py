@@ -62,9 +62,6 @@ class HybridRetriever(Retriever):
             Up to ``k`` hits, best first, with the combined score. Empty
             when BM25 finds nothing (the model is not used then).
 
-        Raises:ined score. Empty
-            when BM25 finds nothing (the model is not used then).
-
         Raises:
             RagError: The embedding model cannot be loaded.
         """

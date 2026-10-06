@@ -131,7 +131,7 @@ class StaticEncoder:
             raise PathError(files_dir, e) from e
         try:
             self._tokenizer.save(str(tokenizer_path))
-        except Exception as e:  # a y.typing import NRust error: no more specific type
+        except Exception as e:
             raise RagError(f"Cannot write '{tokenizer_path}': {e}") from e
 
     @classmethod

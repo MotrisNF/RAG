@@ -269,3 +269,8 @@ class WindowChunk(BaseModel):
 
     windows: list[str]
     windows_count: int
+
+
+class QueryCache(BaseModel):
+    namespace: str
+    entries: dict[str, list[SearchHit]]
