@@ -20,18 +20,17 @@ from tqdm import tqdm
 from .base_retriever import Retriever
 from .bm25_index import BM25Index
 from .cached_retriever import CachedRetriever
-from .chunker import MdChunker, PyChunker
 from .exceptions import (ArgError, DatasetError, DatasetEvaluationError,
                          PathError, RagError, ResultsEvaluationError)
 from .evaluator import Evaluator
 from .models import (Chunk, DtypeMode, MinimalSearchResults, MinimalSource,
                      StudentSearchResults, RagDataset, UnansweredQuestion,
                      EvaluationInform, MinimalAnswer,
-                     StudentSearchResultsAndAnswer, NO_SOURCES, RetrieverMode,
-                     )
+                     StudentSearchResultsAndAnswer, NO_SOURCES, RetrieverMode,)
 from .reader import CorpusReader
 from .vector_index import VectorIndex
 from .hybrid_retriever import HybridRetriever
+from .incremental_indexer import IncrementalIndexer
 
 F = TypeVar("F", bound=Callable[..., Any])
 M = TypeVar("M", bound=BaseModel)
@@ -135,7 +134,8 @@ class RagCLI:
             self,
             max_chunk_size: Annotated[int, Field(gt=0, le=2000)] = 2000,
             raw_dir: Annotated[str, Field(min_length=1)] = "data/raw",
-            index_dir: Annotated[str, Field(min_length=1)] = "data/processed"
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
+            full: bool = False
             ) -> None:
         """Read the corpus in raw_dir, build the search indexes, save them.
 
@@ -144,58 +144,51 @@ class RagCLI:
         BM25 index and the vector index from the same chunks, and save
         both in index_dir, where the search commands load them from.
 
+        Incremental (bonus 3): when index_dir already holds an index of
+        the same raw_dir and max_chunk_size, only the new and modified
+        files are read and indexed, and the chunks of modified and
+        deleted files are removed (``IncrementalIndexer``).
+
         Args:
             max_chunk_size: Maximum length of a chunk, in characters (the
                 moulinette rejects sources longer than 2000).
             raw_dir: Folder with the corpus to index. Relative paths are
                 resolved from the working directory.
             index_dir: Folder where the index is saved; created if needed.
-                A previous index there is replaced, and its query cache
-                removed.
+                When the index changes, its query cache is removed.
+            full: Index the whole corpus again, even if nothing changed
+                (``--full``).
         """
-        result = CorpusReader(raw_dir).read()
+        report = IncrementalIndexer(raw_dir, index_dir,
+                                    max_chunk_size).run(full)
+        if report.read is None:
+            print(f"Index up to date: no file changed in {raw_dir} "
+                  f"({report.chunk_count} chunks in {index_dir}/)")
+            return
+
+        result = report.read
         characters = sum(len(doc.text) for doc in result.documents)
         extensions = Counter(
             PurePosixPath(doc.file_path).suffix for doc in result.documents
         )
         print(f"Read {len(result.documents)} of {result.found} files "
               f"({characters:,} characters) from {raw_dir}")
-        print("  " + " | ".join(
-            f"{ext}: {count}" for ext, count in sorted(extensions.items())
-        ))
+        if result.documents:
+            print("  " + " | ".join(
+                f"{ext}: {count}" for ext, count in sorted(extensions.items())
+            ))
         if result.skipped:
             print(f"Skipped {len(result.skipped)} unreadable files:")
             for path in result.skipped:
                 print(f"  {path}")
 
-        chunkerpy = PyChunker(max_chunk_size)
-        chunkermd = MdChunker(max_chunk_size)
-        chunkspy = chunkerpy.chunk_documents(
-            [doc for doc in result.documents
-             if doc.file_path.endswith(".py")]
-            )
-        chunksmd = chunkermd.chunk_documents(
-            [doc for doc in result.documents
-             if doc.file_path.endswith((".md", ".txt"))]
-        )
-        # A fixed order that does not depend on how the files were read:
-        # the incremental index sorts the same way, so the ids match.
-        chunks = sorted(chunkspy + chunksmd, key=Chunk.order_key)
-
-        print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
-        bm25 = BM25Index.build(chunks)
-        bm25.save(Path(index_dir))
-        # Same chunks in the same order: chunk ids must match BM25.
-        vectors = VectorIndex.build(chunks)
-        vectors.save(Path(index_dir))
-        # Results cached with the old index are never reused (the namespace
-        # changes), so remove the files instead of leaving them on disk.
-        for name in get_args(RetrieverMode):
-            cache_path = CachedRetriever.file_path(Path(index_dir), name)
-            try:
-                cache_path.unlink(missing_ok=True)
-            except OSError as e:
-                raise PathError(cache_path, e) from e
+        if not report.full:
+            changes = report.changes
+            print(f"Incremental: {len(changes.new)} new, "
+                  f"{len(changes.modified)} modified, "
+                  f"{len(changes.deleted)} deleted")
+        print(f"{report.chunk_count} chunks (max {max_chunk_size} "
+              f"characters), {report.fresh_count} indexed now")
         print(f"Ingestion complete! Index saved under {index_dir}/")
 
     @CliCommand.validated

@@ -6,6 +6,7 @@ check the exit code and what is printed on stderr.
 import json
 import sys
 import uuid
+from collections.abc import Collection
 from pathlib import Path
 
 import fire
@@ -533,7 +534,8 @@ class TestCommandNeverRuns:
         """Record every call to ``CorpusReader.read``."""
         calls: list[str] = []
 
-        def spy(self: CorpusReader) -> None:
+        def spy(self: CorpusReader,
+                only: Collection[str] | None = None) -> None:
             """Record the call and fail if the corpus is read."""
             calls.append("read")
             raise AssertionError("the corpus was read")
@@ -565,7 +567,7 @@ class TestCommandNeverRuns:
                                 reads: list[str]) -> None:
         """Extra values: exit 2, nothing read."""
         code, err = runner.run("index", "1", "data/raw", "data/processed",
-                               "extra")
+                               "False", "extra")
         assert code == 2
         assert "Too many arguments for 'index'" in err
         assert reads == []

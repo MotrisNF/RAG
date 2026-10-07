@@ -3,16 +3,27 @@
 The models that describe the corpus (``FileStamp``, ``IndexManifest``,
 ``CorpusChanges``) and ``IncrementalIndexer._diff``, which compares the
 saved manifest with the files found now; ``IndexPlan`` and
-``IncrementalIndexer._plan``, which renumber the chunks. Nothing here
-touches the disk: the "files" are dictionaries of stamps and the chunks
-are built in memory.
+``IncrementalIndexer._plan``, which renumber the chunks: there the
+"files" are dictionaries of stamps and the chunks are built in memory.
+``TestRun`` runs ``IncrementalIndexer.run`` on real files in
+``tmp_path``, with the fake embedding model of ``conftest.py``.
 """
+from collections.abc import Collection
+import os
+from pathlib import Path
+
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
+from src.bm25_index import BM25Index
+from src.cached_retriever import CachedRetriever
+from src.exceptions import PathError
 from src.incremental_indexer import IncrementalIndexer
-from src.models import (Chunk, CorpusChanges, FileStamp, IndexManifest,
-                        IndexPlan)
+from src.models import (Chunk, CorpusChanges, CorpusReadResult, FileStamp,
+                        IndexManifest, IndexPlan, IndexReport)
+from src.reader import CorpusReader
+from src.vector_index import VectorIndex
 
 OLD = FileStamp(mtime_ns=1_000, size=10)
 NEWER = FileStamp(mtime_ns=2_000, size=10)
@@ -357,3 +368,225 @@ class TestPlan:
         IncrementalIndexer._plan(old, ["b.md"], new)
         assert old == OLD_CHUNKS
         assert new == [chunk("aa.md", 0, "new")]
+
+
+class Corpus:
+    """A corpus folder and an index folder under ``tmp_path``.
+
+    Every write sets an explicit modification time one second after the
+    previous one, so a change is always seen even on a file system with
+    coarse timestamps.
+    """
+
+    def __init__(self, root: Path) -> None:
+        """Create ``root/raw`` with three files and the index paths."""
+        self.raw = root / "raw"
+        self.index_dir = root / "index"
+        self.raw.mkdir()
+        self._clock = 1_000_000_000
+        self.write("a.md", "# Title\nLoad a LoRA adapter.\n")
+        self.write("b.py", "def load():\n    return 1\n")
+        self.write("c.txt", "Plain text about the server.\n")
+
+    def write(self, name: str, text: str) -> None:
+        """Write a corpus file with a new modification time."""
+        path = self.raw / name
+        path.write_text(text, encoding="utf-8")
+        self._clock += 1
+        os.utime(path, ns=(self._clock * 10**9, self._clock * 10**9))
+
+    def indexer(self, index_dir: Path | None = None,
+                max_chunk_size: int = 2000) -> IncrementalIndexer:
+        """An indexer of this corpus into ``index_dir``."""
+        return IncrementalIndexer(str(self.raw),
+                                  str(index_dir or self.index_dir),
+                                  max_chunk_size)
+
+    def run(self, full: bool = False) -> IndexReport:
+        """``run`` into the main index folder."""
+        return self.indexer().run(full)
+
+    def path(self, name: str) -> str:
+        """The path of a corpus file as stored in chunks and manifest."""
+        return f"raw/{name}"
+
+
+class TestRun:
+    """``run``: full, up to date or incremental, on real files."""
+
+    @pytest.fixture
+    def corpus(self, tmp_path: Path,
+               monkeypatch: pytest.MonkeyPatch) -> Corpus:
+        """A three-file corpus inside a project root at ``tmp_path``."""
+        monkeypatch.setattr(CorpusReader, "PROJECT_ROOT", tmp_path)
+        return Corpus(tmp_path)
+
+    @staticmethod
+    def assert_same_index(left: Path, right: Path) -> None:
+        """Two saved index folders hold the same indexes."""
+        bm25_left, bm25_right = BM25Index.load(left), BM25Index.load(right)
+        assert bm25_left.chunks == bm25_right.chunks
+        assert bm25_left._postings == bm25_right._postings
+        assert bm25_left._lengths == bm25_right._lengths
+        vec_left, vec_right = VectorIndex.load(left), VectorIndex.load(right)
+        assert np.array_equal(vec_left._owners, vec_right._owners)
+        assert np.array_equal(vec_left._vectors, vec_right._vectors)
+
+    def test_first_run_full(self, corpus: Corpus) -> None:
+        """No manifest: every file is new, and the manifest is written
+        with their stamps."""
+        report = corpus.run()
+        assert report.full
+        assert report.changes.new == [corpus.path("a.md"),
+                                      corpus.path("b.py"),
+                                      corpus.path("c.txt")]
+        assert report.fresh_count == report.chunk_count > 0
+        manifest = IndexManifest.model_validate_json(
+            (corpus.index_dir / IncrementalIndexer.MANIFEST_NAME)
+            .read_text(encoding="utf-8"))
+        assert manifest.files == CorpusReader(corpus.raw).stamps()
+        assert manifest.raw_dir == str(corpus.raw)
+
+    def test_up_to_date_writes_nothing(self, corpus: Corpus) -> None:
+        """Nothing changed: nothing is read or written."""
+        corpus.run()
+        before = {path.name: path.stat().st_mtime_ns
+                  for path in corpus.index_dir.iterdir()}
+        report = corpus.run()
+        assert report.read is None
+        assert not report.full
+        assert report.changes.is_empty
+        assert report.fresh_count == 0
+        assert report.chunk_count == BM25Index.load(
+            corpus.index_dir).chunk_count
+        assert before == {path.name: path.stat().st_mtime_ns
+                          for path in corpus.index_dir.iterdir()}
+
+    def test_incremental_equals_full(self, corpus: Corpus,
+                                     tmp_path: Path) -> None:
+        """New, modified and deleted files at once: the updated index is
+        the same as a full index of the corpus now. The key test."""
+        corpus.run()
+        corpus.write("b.py", "def load():\n    return 2\n\n"
+                     "def save():\n    pass\n")
+        corpus.write("aa.md", "# New\nA new page in the middle.\n")
+        (corpus.raw / "c.txt").unlink()
+
+        report = corpus.run()
+        assert not report.full
+        assert report.changes == CorpusChanges(
+            new=[corpus.path("aa.md")], modified=[corpus.path("b.py")],
+            deleted=[corpus.path("c.txt")])
+        assert report.fresh_count < report.chunk_count
+
+        full_dir = tmp_path / "full"
+        corpus.indexer(full_dir).run(full=True)
+        self.assert_same_index(corpus.index_dir, full_dir)
+
+    def test_only_changed_files_read(self, corpus: Corpus,
+                                     monkeypatch: pytest.MonkeyPatch
+                                     ) -> None:
+        """Only new and modified files are read: the reader gets them as
+        ``only``."""
+        corpus.run()
+        corpus.write("a.md", "# Title\nChanged.\n")
+        corpus.write("d.md", "Another page.\n")
+        asked: list[list[str] | None] = []
+        real_read = CorpusReader.read
+
+        def spy(reader: CorpusReader,
+                only: Collection[str] | None = None) -> CorpusReadResult:
+            """Record what is asked, then read for real."""
+            asked.append(None if only is None else sorted(only))
+            return real_read(reader, only)
+
+        monkeypatch.setattr(CorpusReader, "read", spy)
+        corpus.run()
+        assert asked == [[corpus.path("a.md"), corpus.path("d.md")]]
+
+    def test_only_deleted(self, corpus: Corpus, tmp_path: Path) -> None:
+        """Only a deletion: nothing is read or embedded, the chunks of
+        the file leave."""
+        corpus.run()
+        (corpus.raw / "b.py").unlink()
+        report = corpus.run()
+        assert report.read is not None
+        assert report.read.documents == []
+        assert report.fresh_count == 0
+        assert corpus.path("b.py") not in {
+            chunk.file_path
+            for chunk in BM25Index.load(corpus.index_dir).chunks}
+        corpus.indexer(tmp_path / "full").run(full=True)
+        self.assert_same_index(corpus.index_dir, tmp_path / "full")
+
+    def test_full_flag(self, corpus: Corpus) -> None:
+        """``full`` indexes everything even with nothing changed."""
+        corpus.run()
+        report = corpus.run(full=True)
+        assert report.full
+        assert report.fresh_count == report.chunk_count
+
+    def test_manifest_missing(self, corpus: Corpus) -> None:
+        """No manifest next to an index: full index."""
+        corpus.run()
+        (corpus.index_dir / IncrementalIndexer.MANIFEST_NAME).unlink()
+        assert corpus.run().full
+
+    @pytest.mark.parametrize("content", ["", "not json", "{}",
+                                         '{"max_chunk_size": 0, '
+                                         '"raw_dir": "raw", "files": {}}'])
+    def test_manifest_broken(self, corpus: Corpus, content: str) -> None:
+        """A broken or invalid manifest is not an error: full index."""
+        corpus.run()
+        (corpus.index_dir / IncrementalIndexer.MANIFEST_NAME).write_text(
+            content, encoding="utf-8")
+        assert corpus.run().full
+
+    def test_other_chunk_size(self, corpus: Corpus) -> None:
+        """Another ``max_chunk_size``: no saved chunk is valid, full
+        index."""
+        corpus.run()
+        assert corpus.indexer(max_chunk_size=500).run().full
+        assert not corpus.indexer(max_chunk_size=500).run().full
+
+    @pytest.mark.parametrize("name", [BM25Index.FILE_NAME,
+                                      VectorIndex.VECTOR_NAME])
+    def test_index_file_missing(self, corpus: Corpus, name: str) -> None:
+        """A manifest without its index: full index, not an error."""
+        corpus.run()
+        (corpus.index_dir / name).unlink()
+        report = corpus.run()
+        assert report.full
+        assert (corpus.index_dir / name).is_file()
+
+    def test_query_caches_removed(self, corpus: Corpus) -> None:
+        """A changed index removes the query caches; an index up to date
+        keeps them (their namespace is still valid)."""
+        corpus.run()
+        caches = [CachedRetriever.file_path(corpus.index_dir, name)
+                  for name in ("bm25", "hybrid")]
+        for cache in caches:
+            cache.write_text("{}", encoding="utf-8")
+        corpus.run()
+        assert all(cache.is_file() for cache in caches)
+        corpus.write("a.md", "# Title\nChanged.\n")
+        corpus.run()
+        assert not any(cache.is_file() for cache in caches)
+
+    def test_no_manifest_after_failed_save(self, corpus: Corpus,
+                                           monkeypatch: pytest.MonkeyPatch
+                                           ) -> None:
+        """If writing the indexes fails, no manifest is left: the next
+        run is a full index instead of trusting a half-written one."""
+        corpus.run()
+        corpus.write("a.md", "# Title\nChanged.\n")
+
+        def fail(index: VectorIndex, files_dir: Path) -> None:
+            """Fail like a full disk."""
+            raise PathError(files_dir, OSError("No space left on device"))
+
+        monkeypatch.setattr(VectorIndex, "save", fail)
+        with pytest.raises(PathError):
+            corpus.run()
+        assert not (corpus.index_dir
+                    / IncrementalIndexer.MANIFEST_NAME).exists()

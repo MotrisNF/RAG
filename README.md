@@ -52,7 +52,7 @@ Everything is exposed through a command-line interface built with Python Fire: `
 | Bonus 2: hybrid retrieval | ✅ BM25 candidates re-ranked with the vector scores (default; `--retriever bm25` gives the lexical search alone) |
 | Bonus 4: caching | ✅ Cold start: the embedding model is saved with the index and run with numpy, so searching never imports PyTorch. Repeated queries: results are cached on disk, so a repeated search loads no index at all (`--cache=False` to turn it off) |
 | Bonus 5: local HTTP API | ✅ `serve` starts a FastAPI server on `127.0.0.1` with `/health`, `/search` and `/answer`, which return the same JSON as the CLI. The model is loaded on the first `/answer` and kept for the next ones |
-| Bonus 3: incremental indexing | Not started |
+| Bonus 3: incremental indexing | ✅ `index` compares each file's size and modification time with `manifest.json` and only reads, tokenizes and embeds the new and modified files; the chunks of modified and deleted files leave both indexes. The result is identical to a full index. `--full` forces a full one |
 
 ---
 
@@ -94,6 +94,7 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 │   ├── api.py           # RagApi: the local HTTP API (bonus 5)
 │   ├── argv_guard.py    # command-line checks before Fire runs
 │   ├── reader.py        # CorpusReader
+│   ├── incremental_indexer.py  # IncrementalIndexer: what index re-indexes (bonus 3)
 │   ├── chunker.py       # FixedSizeChunker, PyChunker, MdChunker
 │   ├── tokenizer_bm.py  # Tokenizer (BM25 terms, query stopwords)
 │   ├── base_retriever.py, bm25_index.py, vector_index.py,
@@ -121,7 +122,7 @@ uv run -m src <command> --help               # options of a command
 
 | Command | Options (default) | Output |
 |---|---|---|
-| `index` | `--max_chunk_size` (2000, at most 2000) · `--raw_dir` (`data/raw`) · `--index_dir` (`data/processed`) | The BM25 index (`index.json`), the vector index (`vectors.npy`, `owners.npy`) and the embedding model (`embeddings.npy`, `tokenizer.json`). Removes the query caches of the previous index |
+| `index` | `--max_chunk_size` (2000, at most 2000) · `--raw_dir` (`data/raw`) · `--index_dir` (`data/processed`) · `--full` (`False`) | The BM25 index (`index.json`), the vector index (`vectors.npy`, `owners.npy`), the embedding model (`embeddings.npy`, `tokenizer.json`) and the corpus stamps (`manifest.json`). Only the files changed since the last run are re-indexed; with no change, nothing is written. Removes the query caches when the index changes |
 | `search <query>` | `--k` (10) · `--index_dir` · `--retriever` (`hybrid` \| `bm25`) · `--cache` (`True`) · `--save_directory` (`data/output/search_results/SingleQuestions`) | `StudentSearchResults` JSON on stdout and in `<question_id>.json` |
 | `search_dataset` | `--dataset_path` (required) · `--k` (10) · `--save_directory` (`data/output/search_results/UnansweredQuestions`) · `--index_dir` · `--retriever` · `--cache` | `StudentSearchResults` JSON, with the same file name as the dataset |
 | `answer <query>` | `--k` (10) · `--index_dir` · `--retriever` · `--dtype` (`auto` \| `float32` \| `bfloat16`) · `--cache` · `--save_directory` (`data/output/search_results_and_answer/SingleQuestions`) | `StudentSearchResultsAndAnswer` JSON on stdout and in `<question_id>.json` |
@@ -132,6 +133,7 @@ uv run -m src <command> --help               # options of a command
 - `search` and `answer` print their JSON on stdout and also save it as `<save_directory>/<question_id>.json`. Progress bars and status messages, including where the file was saved, go to stderr, so you can still redirect or pipe the JSON (`> out.json`, `| jq`).
 - Put boolean flags such as `--show_failed` after the paths, or write them as `--show_failed=True`. Otherwise Fire reads the next word as the flag's value.
 - `--dtype` and `--retriever` only accept the listed values. Any other value is rejected with a clear argument error.
+- `index` is incremental: run it again after editing the corpus and only the new and modified files are processed. A different `--raw_dir` or `--max_chunk_size`, a missing or broken `manifest.json` or index file, or `--full` give a full index.
 - `--cache` is on by default: searches already made with the same index and retriever are read from `<index_dir>/query_cache_<retriever>.json`. Turn it off with `--cache=False`.
 
 ### Makefile
@@ -151,6 +153,7 @@ uv run -m src <command> --help               # options of a command
 | `make test_limits_cached` | `test_limits` (indexing removes the query cache, so the searches are uncached), then `test_retrieval` again without indexing, with every question read from the cache |
 | `make test_answer` | Runs `answer` on the 10-question battery in `tests/answer_battery` and prints the expected answer after each one |
 | `make test_answer_dataset` | The same on a whole `AnsweredQuestions` dataset, with a log (variables `ANSWER_DATASET`, `ANSWER_START`, `ANSWER_LIMIT`, `ANSWER_ARGS`) |
+| `FULL=0` | With `test_index`, `test_limits`, `test_rag` or `test_rag_base`: index incrementally instead of with `--full` (the default, `FULL=1`). To show the difference: `make test_index`, `touch` a corpus file, then `make test_index FULL=0` |
 | `make clean` | Removes `__pycache__`, `.mypy_cache`, `.pytest_cache` and the `test_rag` outputs |
 | `make cleandata` | Removes the generated index and JSON outputs, and keeps the folder layout |
 
@@ -308,6 +311,8 @@ question ──► BM25Index.search ──► top 30 candidates ──┐
                                                               → greedy generation → answer → JSON
 ```
 
+`index` goes through `IncrementalIndexer`. It compares the stamps of the corpus files (size and modification time, read with `stat` and without opening the files) with those saved in `manifest.json`. Only new and modified files are read and chunked. `_plan` builds the sorted list of chunks of the new index and a map `{old chunk id: new chunk id}` of the chunks that stay, and both indexes use that same map in `update`: kept chunks move their data to their new id, removed ones leave, and only the new ones are tokenized and embedded. With no usable manifest or index, the same path runs with no old chunks, which is a full index.
+
 With `--retriever bm25`, the top-k sources come straight from `BM25Index.search` and the vector index is never loaded. Searching never reads the Hugging Face cache, because the embedding model is read from the index folder.
 
 With `--cache` (the default), the chosen retriever is wrapped in a `CachedRetriever`. A question already searched is answered from `query_cache_<retriever>.json`, and the indexes are only loaded by the first question that is not cached, so a fully cached command never loads them.
@@ -318,6 +323,7 @@ With `--cache` (the default), the chosen retriever is wrapped in a `CachedRetrie
 | `CliCommand.validated` | `src/commands.py` | Decorator that runs pydantic `validate_call` on every command (Fire ignores type hints) and gives `--help` a clean signature. |
 | `ArgvGuard` | `src/argv_guard.py` | Checks the command line **before** Fire runs it: unknown commands and options, private names, extra arguments, a misplaced `--help`. Without it, Fire would run the command first and complain afterwards. |
 | `CorpusReader` | `src/reader.py` | Reads every `.py`, `.md` and `.txt` file under the corpus folder. Paths are stored relative to the project root, because the grader compares them verbatim. Folders outside the project are rejected. |
+| `IncrementalIndexer` | `src/incremental_indexer.py` | Runs `index`: finds the new, modified and deleted files (`_diff`), plans the chunk ids of the new index (`_plan`), updates or builds both indexes, and writes `manifest.json` last. |
 | `PyChunker`, `MdChunker` | `src/chunker.py` | The two chunking strategies, built on a shared `FixedSizeChunker`. |
 | `Tokenizer` | `src/tokenizer_bm.py` | Turns text into terms, the same way for chunks and queries. Stopwords are removed from queries only. |
 | `Retriever` | `src/base_retriever.py` | Abstract base with one method, `search(query, k)`. The commands only see a `Retriever`. |
@@ -328,7 +334,7 @@ With `--cache` (the default), the chosen retriever is wrapped in a `CachedRetrie
 | `CachedRetriever` | `src/cached_retriever.py` | A `Retriever` that wraps another one (decorator pattern), remembers its results by question and `k`, saves them to disk between commands, and only loads the wrapped retriever when a question is not cached. |
 | `Generator` | `src/generator.py` | Loads Qwen3-0.6B once, fits the chunks into the token budget, builds the prompt and generates the answer. |
 | `Evaluator` | `src/evaluator.py` | recall@k with the moulinette's rules: same file, character IoU ≥ 0.05, sources of at most 2,000 characters. |
-| Models | `src/models.py` | The subject's pydantic models (`MinimalSource`, `StudentSearchResults`…) and internal ones (`Chunk`, `Document`, `SearchHit`, `IndexData`, `WindowChunk`, `QueryCache`). |
+| Models | `src/models.py` | The subject's pydantic models (`MinimalSource`, `StudentSearchResults`…) and internal ones (`Chunk`, `Document`, `SearchHit`, `IndexData`, `WindowChunk`, `QueryCache`, and for bonus 3 `FileStamp`, `IndexManifest`, `CorpusChanges`, `IndexPlan`, `IndexReport`). |
 | Errors | `src/exceptions.py` | One hierarchy (`RagError`). Every expected failure ends with a clear message and an exit code, never a traceback. |
 
 - `answer` and `answer_dataset` import `Generator` inside the command, so `index`, `search`, `search_dataset`, `evaluate` and `--help` never load PyTorch.
@@ -625,6 +631,23 @@ Removing the Python loop that averages the token vectors was measured and discar
 
 What is left in a cached run is starting Python and reading the cache file (~3.7 MB for the 100 docs questions). `make test_limits` still measures the cold case, because `index` removes the caches first. `make test_limits_cached` shows both cases one after the other.
 
+### Incremental indexing (bonus 3)
+
+Before the change, `index` spent ~8.1 s on campus. Reading and chunking took 5 % of it; tokenizing for BM25 took 30 % and the embeddings 50 %. So both indexes are updated, not only the vectors: rebuilding BM25 from every chunk would still tokenize the whole corpus.
+
+Measured on the real corpus (1,969 files, 12,907 chunks), on one computer, the whole command:
+
+| Run | Time | Chunks tokenized and embedded |
+|---|---|---|
+| Full (`--full`, or first run) | ~4.6 s | 12,907 |
+| Nothing changed | **~0.8 s** | 0, and nothing is written |
+| 1 file changed | **~1.35 s** | only its chunks (7 for `README.md`) |
+| 50 files changed | ~1.35 s | |
+| 500 files changed | ~2.0 s | |
+| Index and recall@1/3/5/10 | | identical to a full index |
+
+What is left with one changed file is starting Python, loading the old index and saving the new one, which grow with the corpus and not with the change. On the real corpus, after touching 140 files, the incremental index and a full one have the same chunks, postings, lengths, owners and vectors (compared with `==` and `np.array_equal`).
+
 ### Generation
 
 Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 2, 🟡 1, ⚪ refusal 0, ❌ −1.
@@ -657,13 +680,14 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 
 ### Tests
 
-`make test` runs **1,187 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
+`make test` runs **1,294 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
 
 - **Chunkers:** exact offsets, no gaps or overlaps, never above the maximum, always progressing. These are checked on random texts and on the whole real corpus. Separator priorities, whole code blocks and decorators are tested too.
 - **BM25:** scores compared with a naive reference implementation of the formula, plus tie-breaking, query stopwords and the save/load round trip.
 - **Vector index and hybrid retriever:** windows, path prefix, best window per chunk, save/load and broken files. The combination formula is checked on fixed scores: `ALPHA = 0` gives exactly the BM25 order, `ALPHA = 1` the similarity order, and only BM25 candidates come out.
 - **`CachedRetriever`:** with a stand-in retriever that counts how often it is built and searched. Covers hits and misses, the wrapped retriever never built when everything is cached, another `k` as another entry, copies returned, the round trip to disk, another namespace, broken, empty or non-UTF-8 files, an unwritable folder, a failed final move that keeps the old file, no rewrite when nothing is new, and the namespace changing with the retriever, its parameters and the index files. Through the CLI: a repeated `search` loads no index, `--cache=False` loads every time, and `index` removes the caches.
 - **`StaticEncoder`:** a tiny real model built inside the test (5-word tokenizer, table of known vectors). Covers the mean and normalisation computed by hand, unknown words, empty texts (zeros, never NaN), and loading from the cache, with a download, or with neither.
+- **Incremental indexing:** the change detection (`_diff`) and the plan (`_plan`) on dictionaries and chunks built in memory, with new files that shift the ids, modified files with more or fewer chunks, deletions and everything at once. `BM25Index.update` and `VectorIndex.update` are compared with `build` (also on the real corpus for BM25), and spies check that only the new chunks are tokenized and embedded. `run` on real files: the first run is full, a second one writes nothing, new, modified and deleted files at once give the same index as a full run, only the changed files are read, and a missing or broken manifest, another chunk size, a missing index file or `--full` give a full index. A failed save leaves no manifest.
 - **Evaluator:** the same numbers as the moulinette.
 - **HTTP API:** with FastAPI's `TestClient`, a small BM25 index and a fake model. Covers `/health`, the JSON of `/search` and `/answer`, 422 for every invalid parameter (including a query of only spaces), 503 with the CLI's message for every `RagError` (a missing index, a model that does not fit), an index built while the server runs and used without a restart, no model load without sources or for `/search`, a single load with the server's `dtype` over several answers, 503 when PyTorch fails (and `/search` still answering), parallel searches that never overlap inside the retriever, and the query cache saved after each request. PyTorch is never imported: the tests replace `src.generator` before the endpoint imports it.
 - **CLI:** every command, argument validation, error messages, unknown or private options, exit codes, `--help`, and source paths outside the project.
@@ -685,6 +709,10 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **A cached result is only reused for the same index and configuration.** Each cache file carries a namespace: the retriever, its parameters (`K1`, `B`, `CANDIDATES`, `ALPHA`, the model) and the size and modification time of the index files. Rebuilding the index or changing a parameter gives a new namespace, and the old results are ignored. Only file metadata is read, so it is instant.
 - **The cache never breaks a command.** A missing, broken or foreign cache file means an empty cache, and a cache that cannot be written only prints a warning. It is written to a temporary file and moved over the old one (`os.replace`), so an interrupted write never leaves a half-written file. JSON validated with pydantic, not pickle, as for the index.
 - **Exact-match cache, not a semantic one.** Reusing the results of a *similar* question (embedding similarity above a threshold) was considered and discarded. With `potion-base-8M`, *"What is the minimum version of bitsandbytes?"* and *"… maximum version …"* have a similarity of 0.904, the same as a real paraphrase (*"How do I load a LoRA adapter?"* / *"… in vLLM?"*), and *load* / *unload* (0.847) share only 1 of their 5 BM25 results. Because the model averages word vectors, changing one word barely moves the vector, so no threshold separates paraphrases from opposite questions. A semantic cache would also make the output depend on earlier questions, and it would have to load the model on every command to save a ~7 ms search.
+- **Incremental indexing on both indexes, with one shared plan.** A chunk id is the chunk's position, and BM25's postings and lengths and the vector owners all store it. Removing a chunk shifts every later id, which would give wrong results with no error. `IncrementalIndexer._plan` computes the map `{old id: new id}` once and gives the same one to `BM25Index.update` and `VectorIndex.update`, so the two indexes cannot drift apart.
+- **The incremental index equals the full one.** Chunks are always sorted by file and position (`Chunk.order_key`), in the full index too, and a chunk is tokenized (`_chunk_tokens`) and embedded (`_embed`) by the same method in `build` and `update`. So the best test is simple: an updated index must be identical to a full index of the same corpus.
+- **Changes found by `stat`, before reading.** Size and modification time in nanoseconds (`st_mtime_ns`), as for the query cache. Files are only opened if they are new or modified.
+- **`manifest.json` is removed first and written last.** If `index` stops halfway, no manifest describes indexes that were only partly replaced, and the next run is a full index. A missing, broken or foreign manifest, or a missing index file, means a full index, never an error. A different `--raw_dir` or `--max_chunk_size` also gives a full one, because no saved chunk would be valid.
 - **The lexical method is always available.** `--retriever bm25` runs the mandatory method alone and never loads the vector index.
 - **Stopwords on the query only**, so the list can change without rebuilding the index.
 - **Paths relative to the project root**, written exactly as in the corpus (`data/raw/vllm-0.10.1/...`), because the grader compares them verbatim.
@@ -729,6 +757,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **A 0.6B model.** It sometimes picks a value from a similar but wrong chunk, and it is sensitive to the exact mix of chunks in its context. The full-dataset answer evaluation was done with BM25 retrieval; with the hybrid retriever, a different set of chunks reaches the model.
 - **Grounded is not always correct.** In one case the model quoted vLLM's own assertion message, which contradicts the condition next to it (`vllm/v1/core/kv_cache_coordinator.py`).
 - **One answer at a time in the API.** Requests to `/answer` are served one after another, so a second user waits for the first answer. That is enough for a local server, and running them in parallel on a CPU would not be faster.
+- **Incremental indexing trusts the stamps.** A change to the chunker or tokenizer code, or a file edited while keeping the same size and modification time, is not detected: `index --full` rebuilds everything. Loading and saving the indexes still grow with the corpus, so even one changed file costs about a second.
 - **Memory check in containers.** The check reads the memory of the whole machine (`/proc/meminfo`). Inside a container or cgroup with its own limit, it can overestimate what is available.
 
 ---
@@ -754,10 +783,11 @@ I used an AI assistant throughout the project, as a tutor, a reviewer and a pair
 
 - **Learning.** Explanations of the subject, RAG, BM25, tokenization, embeddings, PyTorch and transformers, with exercises solved step by step (personal study notes, not part of the repository).
 - **Review.** Reviews of my code (bugs found in the reader, the index, the evaluator, the CLI and the answer commands), of my design choices and of the Fire edge cases. It also checked the project against the subject's requirements.
-- **Planning of the bonus work.** Step-by-step plans with class skeletons for the vector index, the hybrid retriever and the caching layer, which I then implemented and tested.
+- **Planning of the bonus work.** Step-by-step plans with class skeletons for the vector index, the hybrid retriever, the caching layer and the incremental indexing, which I then implemented and tested.
 - **Code, on request:**
   - the CLI hardening (`CliCommand.validated`);
   - the decorator handling of `PyChunker`;
+  - the coordination of the incremental index (`IncrementalIndexer.run` and `_save`) and the new `index` output;
   - the query stopword list;
   - most of the test suite;
   - several Makefile rules.

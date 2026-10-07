@@ -58,6 +58,16 @@ lint-strict:
 test:
 	uv run pytest
 
+# How test_rag, test_rag_base and test_index run `index` (bonus 3):
+#   FULL=1 (default): --full, always the whole corpus. Measures the
+#                     subject's limit and removes the query caches.
+#   FULL=0:           incremental, only the files changed since the last
+#                     index; nothing is written if none changed. To show
+#                     the difference: make test_index, touch a corpus file,
+#                     then make test_index FULL=0.
+FULL       ?= 1
+INDEX_FULL := $(if $(filter 1,$(FULL)),--full)
+
 # Full pipeline (index -> search_dataset -> evaluate) on the mini corpus in
 # tests/data. Generated files go to tests/data/processed and
 # tests/data/output (ignored by git, removed by `make clean`).
@@ -71,7 +81,7 @@ TEST_CHUNK   ?= 500
 
 test_rag:
 	time uv run -m src index --raw_dir $(TEST_DATA)/raw --index_dir $(TEST_INDEX) \
-		--max_chunk_size $(TEST_CHUNK)
+		--max_chunk_size $(TEST_CHUNK) $(INDEX_FULL)
 	time uv run -m src search_dataset \
 		--dataset_path $(TEST_DATA)/datasets/UnansweredQuestions/$(TEST_DATASET) \
 		--k $(TEST_K) --save_directory $(TEST_OUTPUT) --index_dir $(TEST_INDEX)
@@ -92,7 +102,7 @@ BASE_CHUNK    := 2000
 
 test_rag_base:
 	time uv run -m src index --raw_dir $(BASE_DATA)/raw --index_dir $(BASE_INDEX) \
-		--max_chunk_size $(BASE_CHUNK)
+		--max_chunk_size $(BASE_CHUNK) $(INDEX_FULL)
 	@for dataset in $(BASE_DATASETS); do \
 		echo "===== $$dataset ====="; \
 		time uv run -m src search_dataset \
@@ -107,13 +117,15 @@ test_rag_base:
 
 # Subject time limits (chapter VII), checked on the real data with the
 # moulinette settings. Each rule prints the time and PASS or FAIL.
-#   test_index:     indexing the whole corpus in at most 5 minutes.
+#   test_index:     indexing the whole corpus in at most 5 minutes
+#                   (FULL=0 for an incremental index instead, see FULL).
 #   test_retrieval: at most 90 s for 200 questions (both public datasets,
 #                   199 questions, each search_dataset loading the index).
 #   test_limits:    both.
 #   test_limits_cached: test_limits (index removes the query cache, so the
-#                   searches are uncached), then test_retrieval again
-#                   without indexing (every question read from the cache).
+#                   searches are uncached; FULL=1 only), then test_retrieval
+#                   again without indexing (every question read from the
+#                   cache).
 INDEX_LIMIT     := 300
 PASS            := printf '\033[1;32mPASS\033[0m\n'
 FAIL            := printf '\033[1;31mFAIL\033[0m\n'
@@ -122,9 +134,10 @@ RETRIEVAL_LIMIT := 90
 test_index:
 	@start=$$(date +%s%N); \
 	uv run -m src index --raw_dir $(BASE_DATA)/raw --index_dir $(BASE_INDEX) \
-		--max_chunk_size $(BASE_CHUNK) || exit 1; \
+		--max_chunk_size $(BASE_CHUNK) $(INDEX_FULL) || exit 1; \
 	ms=$$(( ($$(date +%s%N) - start) / 1000000 )); \
-	echo "===== Indexing: $$(LC_ALL=C awk "BEGIN {printf \"%.1f\", $$ms / 1000}") s" \
+	echo "===== Indexing ($(if $(INDEX_FULL),full,incremental)):" \
+		"$$(LC_ALL=C awk "BEGIN {printf \"%.1f\", $$ms / 1000}") s" \
 		"(limit $(INDEX_LIMIT) s)"; \
 	if [ $$ms -le $$(( $(INDEX_LIMIT) * 1000 )) ]; then $(PASS); \
 	else $(FAIL); exit 1; fi

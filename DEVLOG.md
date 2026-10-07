@@ -718,6 +718,31 @@ Cache file: ~3.7 MB for 100 questions with k = 10 (whole `SearchHit`s, chunk tex
 - `time.perf_counter()`, not `time.time()`: a monotonic clock meant for durations (`time.time()` is wall-clock time and can jump).
 - Measure before designing: my first proposal (rebuild BM25 whole, reuse only the vectors) would have left 30 % of the work untouched.
 
+## Step 27 — Bonus 3: incremental indexing (2026-10-07)
+
+**What**
+- **Change detection without reading.** `CorpusReader.stamps()` gives `{path: FileStamp}` (size and `st_mtime_ns`) with one `stat` per file. `IncrementalIndexer._diff` compares it with the saved `manifest.json` and returns `CorpusChanges` (new, modified, deleted; a modified file is removed and added again). `CorpusReader.read(only=...)` reads only the new and modified files.
+- **A fixed chunk order**, `Chunk.order_key()` = `(file_path, first_character_index)`, in the full index too. It used to be every `.py` and then every `.md`. Recall unchanged (only ties could move): docs 0.910 / code 0.828 hybrid, 0.870 / 0.758 bm25.
+- **The plan.** `IncrementalIndexer._plan(old_chunks, to_remove, new_chunks)` returns an `IndexPlan`: the sorted chunks of the new index and `remap = {old id: new id}` of the kept ones; `fresh_ids` are the ids not reached by the remap, the only chunks to process. `order_key` works as the identity of a chunk, because a kept chunk and a new one never share it.
+- **`BM25Index.update(plan)`**: lengths and postings moved with the remap without tokenizing, a term left without chunks removed, only the fresh chunks tokenized. IDF and the average length are recomputed by `__init__`. The tokenization of one chunk (`_chunk_tokens`) is shared with `build`.
+- **`VectorIndex.update(plan)`**: the owners renumbered (`-1` for a removed chunk), a boolean mask keeps the rows, only the fresh windows are embedded (`_embed`, shared with `build`), then a stable `argsort` on the owners, which keeps the windows of a chunk in order.
+- **`IncrementalIndexer.run(full)`** decides full or incremental, and `RagCLI.index` only prints its `IndexReport`. `index --full` forces a full index. The manifest is removed before anything is written and written last. The query caches are removed only when the index changes.
+- Tests: `_diff`, `_plan`, both `update` methods compared with `build` (BM25 also on the real corpus), spies that check what is tokenized, embedded and read, and `run` on real files in `tmp_path`. Suite: 1,294 tests.
+
+**Measured** (real corpus, whole command): full ~4.6 s, nothing changed ~0.8 s, 1 or 50 files ~1.35 s, 500 files ~2.0 s. After touching 140 files, the incremental index and a full one are identical (chunks, postings, lengths, owners, vectors).
+
+**Bugs I made on the way (all silent: valid numbers, wrong results)**
+- `fresh_ids` with `set(self.remap)`: the *keys* (old ids), not the values (new ids). Invisible when nothing shifts; caught with a new file in the middle.
+- `enumerate(plan.remap)` instead of `plan.remap.items()`, and storing the id instead of `self._lengths[old_id]`: BM25 thought chunks were 0, 1, 2… tokens long. The test "`update` == `build`" caught it (`lengths` and `search` False).
+- `self._owners[keep]` instead of `moved[keep]`: rows filtered but not renumbered, so two chunks shared an id.
+
+**Learned**
+- When several structures store positions, removing one element is a renumbering problem. Compute the map once and give it to everyone.
+- The strongest test for an optimisation is equality with the slow path.
+- Iterating a dict gives its keys; `.items()` gives the pairs; `enumerate` adds a counter, not the value.
+- numpy: `array >= 0` is a mask with no loop, `array[mask]` keeps rows, `np.argsort(kind="stable")` gives the order without breaking ties.
+- Write the "this is valid" marker (the manifest) last and remove it first: an interrupted run then falls back to the safe path.
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.

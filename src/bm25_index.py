@@ -63,6 +63,12 @@ class BM25Index(Retriever):
         """Number of indexed chunks (chunk ids go from 0 to this - 1)."""
         return self._n_chunks
 
+    @property
+    def chunks(self) -> list[Chunk]:
+        """The indexed chunks, by chunk id (a copy: changing it does not
+        change the index)."""
+        return list(self._chunks)
+
     @classmethod
     def build(cls, chunks: list[Chunk]) -> "BM25Index":
         """Build the index by tokenizing every chunk once.

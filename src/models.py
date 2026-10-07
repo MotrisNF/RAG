@@ -395,3 +395,23 @@ class IndexPlan(BaseModel):
         the only ones to tokenize and embed."""
         reused = set(self.remap.values())
         return [i for i in range(len(self.chunks)) if i not in reused]
+
+
+class IndexReport(BaseModel):
+    """What one ``index`` run did, for the command to print.
+
+    Attributes:
+        full: True when the whole corpus was indexed again.
+        changes: What changed since the saved index; in a full index,
+            every file is new.
+        read: The files read and skipped, or ``None`` when the index was
+            already up to date and nothing was read or written.
+        chunk_count: Chunks in the index now.
+        fresh_count: Chunks tokenized and embedded in this run.
+    """
+
+    full: bool
+    changes: CorpusChanges
+    read: CorpusReadResult | None
+    chunk_count: int
+    fresh_count: int

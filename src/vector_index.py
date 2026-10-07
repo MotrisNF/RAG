@@ -194,7 +194,7 @@ class VectorIndex:
         """
         moved = np.array([plan.remap.get(int(owner), -1)
                           for owner in self._owners], dtype=np.intp)
-        keep = move >= 0
+        keep = moved >= 0
         vectors = self._vectors[keep]
         owners = moved[keep]
 

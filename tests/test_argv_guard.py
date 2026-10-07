@@ -410,7 +410,7 @@ class TestRagCLI:
     def test_uses_clean_signatures(self) -> None:
         """Parameters come from the decorated methods."""
         params = ArgvGuard(RagCLI)._params("index")
-        assert params == ["max_chunk_size", "raw_dir", "index_dir"]
+        assert params == ["max_chunk_size", "raw_dir", "index_dir", "full"]
 
     @pytest.mark.parametrize("argv", [
         ["index", "--chunk_size", "5"],
