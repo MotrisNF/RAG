@@ -17,7 +17,8 @@ from src.api import RagApi
 from src.base_retriever import Retriever
 from src.bm25_index import BM25Index
 from src.cached_retriever import CachedRetriever
-from src.exceptions import RagError
+from src.commands import RagCLI
+from src.exceptions import IndexNotFoundError, RagError
 from src.models import (NO_SOURCES, Chunk, SearchHit, StudentSearchResults,
                         StudentSearchResultsAndAnswer)
 
@@ -37,6 +38,14 @@ class FakeGenerator:
         """Record the call; the answer names the number of chunks."""
         self.calls.append((question, chunks))
         return f"Answer from {len(chunks)} chunks."
+
+
+class Broken(Retriever):
+    """Retriever whose index is missing, as before ``index``."""
+
+    def search(self, query: str, k: int) -> list[SearchHit]:
+        """Always fails with the CLI's error."""
+        raise IndexNotFoundError("data/processed")
 
 
 class Empty(Retriever):
@@ -137,6 +146,8 @@ class TestValidation:
     @pytest.mark.parametrize("params", [
         {},
         {"query": ""},
+        {"query": "   "},
+        {"query": "\t\n"},
         {"query": "lora", "k": 0},
         {"query": "lora", "k": -1},
         {"query": "lora", "k": "abc"},
@@ -148,6 +159,12 @@ class TestValidation:
         response = client.get(endpoint, params=params)
         assert response.status_code == 422
         assert api._generator.calls == []  # type: ignore[union-attr]
+
+    def test_spaces_stripped(self, client: TestClient) -> None:
+        """Spaces around the question are removed, as in the CLI."""
+        response = client.get("/search", params={"query": "  lora  "})
+        assert response.status_code == 200
+        assert response.json()["search_results"][0]["question"] == "lora"
 
     def test_unknown_path(self, client: TestClient) -> None:
         """404 for an endpoint that does not exist."""
@@ -260,6 +277,42 @@ class TestModelLoading:
         assert rag._generator is None
         assert client.get("/search",
                           params={"query": "lora"}).status_code == 200
+
+
+class TestRagErrors:
+    """A ``RagError`` is a 503 with its message, never a 500."""
+
+    @pytest.mark.parametrize("endpoint", ["/search", "/answer"])
+    def test_index_missing_503(self, endpoint: str) -> None:
+        """The retriever fails: 503 with the CLI's message."""
+        response = TestClient(RagApi(Broken()).app).get(
+            endpoint, params={"query": "lora"})
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "No index found in 'data/processed'. "
+                      "Run 'index' first."}
+
+    def test_server_keeps_running(self) -> None:
+        """After a 503 the server still answers."""
+        client = TestClient(RagApi(Broken()).app)
+        client.get("/search", params={"query": "lora"})
+        assert client.get("/health").status_code == 200
+
+    def test_index_built_later(self, tmp_path: Path, bm25: BM25Index,
+                               capsys: pytest.CaptureFixture[str]) -> None:
+        """With the cache (the ``serve`` default) the index is loaded by
+        the first search: a 503 before ``index``, results after it,
+        without restarting the server."""
+        retriever = RagCLI._load_retriever(str(tmp_path), "bm25", True)
+        client = TestClient(RagApi(retriever).app)
+        params = {"query": "lora adapter", "k": 2}
+        assert client.get("/search", params=params).status_code == 503
+        bm25.save(tmp_path)
+        capsys.readouterr()
+        response = client.get("/search", params=params)
+        assert response.status_code == 200
+        assert len(response.json()["search_results"][0]
+                   ["retrieved_sources"]) == 2
 
 
 class TestConcurrency:

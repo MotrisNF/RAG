@@ -8,8 +8,9 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import FastAPI, HTTPException, Query
-
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import StringConstraints
 
 from .base_retriever import Retriever
 from .commands import RagCLI
@@ -21,6 +22,12 @@ from .models import (NO_SOURCES, DtypeMode, MinimalAnswer, MinimalSource,
 if TYPE_CHECKING:
     from .generator import Generator
 
+# A question with text: surrounding spaces are removed first, so a query
+# of only spaces is rejected (422), as the CLI does.
+QueryText = Annotated[str, StringConstraints(strip_whitespace=True,
+                                             min_length=1), Query()]
+TopK = Annotated[int, Query(gt=0)]
+
 
 class RagApi:
     """The FastAPI application and the state shared by its requests.
@@ -29,6 +36,10 @@ class RagApi:
     its own, so the shared objects are guarded by two locks (mutexes):
     one for the retriever and its query cache, one for the model. They
     are never held together, so they cannot block each other.
+
+    Every ``RagError`` raised by a request (no index, a broken index,
+    the model not fitting in memory...) becomes a 503 with its message:
+    never a 500 with a traceback, as the CLI never prints one.
 
     Attributes:
         DESCRIPTION: Shown at the top of the ``/docs`` page.
@@ -66,17 +77,35 @@ class RagApi:
         self._retriever_lock = threading.Lock()
         self.app = FastAPI(title="RAG against the machine",
                            description=self.DESCRIPTION)
+        self.app.exception_handler(RagError)(self._rag_error)
         self.app.get("/health")(self.health)
         self.app.get("/search")(self.search)
         self.app.get("/answer")(self.answer)
+
+    @staticmethod
+    def _rag_error(request: Request, error: Exception) -> JSONResponse:
+        """Turn a ``RagError`` into a 503 with its message.
+
+        503 (Service Unavailable): the request was valid, but the server
+        cannot serve it until something is fixed on its side (run
+        ``index``, free memory...). The next request tries again, so
+        the server does not need a restart.
+
+        Args:
+            request: The request that failed (not used).
+            error: The ``RagError``.
+
+        Returns:
+            ``{"detail": "<message>"}``, the same shape FastAPI uses for
+            its own errors.
+        """
+        return JSONResponse(status_code=503, content={"detail": str(error)})
 
     def health(self) -> dict[str, str]:
         """Check that the server is up (it never loads anything)."""
         return {"status": "ok"}
 
-    def search(self,
-               query: Annotated[str, Query(min_length=1)],
-               k: Annotated[int, Query(gt=0)] = 10
+    def search(self, query: QueryText, k: TopK = 10
                ) -> StudentSearchResults:
         """Return the ``k`` best source locations for a question.
 
@@ -101,9 +130,9 @@ class RagApi:
         Must be called with ``_generator_lock`` held.
 
         Raises:
-            HTTPException: 503 when PyTorch cannot be imported or the
-                model does not fit in memory; the next request tries
-                again.
+            HTTPException: 503 when PyTorch cannot be imported.
+            RagError: The model does not fit in memory (503, through
+                ``_rag_error``). Either way the next request tries again.
         """
         if self._generator is None:
             try:
@@ -115,15 +144,10 @@ class RagApi:
                     detail=f"Cannot load PyTorch ({type(e).__name__}: {e})."
                 ) from e
             print(f"Loading {Generator.MODEL_NAME}...", file=sys.stderr)
-            try:
-                self._generator = Generator(self._dtype)
-            except RagError as e:
-                raise HTTPException(status_code=503, detail=str(e)) from e
+            self._generator = Generator(self._dtype)
         return self._generator
 
-    def answer(self,
-               query: Annotated[str, Query(min_length=1)],
-               k: Annotated[int, Query(gt=0)] = 10
+    def answer(self, query: QueryText, k: TopK = 10
                ) -> StudentSearchResultsAndAnswer:
         """Answer a question from its ``k`` best sources.
 

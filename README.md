@@ -269,12 +269,12 @@ $ curl -G "http://127.0.0.1:8000/answer" --data-urlencode "query=What is the min
 | Endpoint | Parameters | Response |
 |---|---|---|
 | `GET /health` | none | `{"status": "ok"}` |
-| `GET /search` | `query` (required, not empty) · `k` (10, > 0) | `StudentSearchResults`, as the `search` command |
-| `GET /answer` | `query` (required, not empty) · `k` (10, > 0) | `StudentSearchResultsAndAnswer`, as the `answer` command |
+| `GET /search` | `query` (required, not only spaces) · `k` (10, > 0) | `StudentSearchResults`, as the `search` command |
+| `GET /answer` | `query` (required, not only spaces) · `k` (10, > 0) | `StudentSearchResultsAndAnswer`, as the `answer` command |
 
 - **Same JSON as the CLI.** The endpoints return the same pydantic models, so the output can be fed to `evaluate` like the files the commands save. The API itself saves nothing.
 - **The model is loaded once.** The first `/answer` loads PyTorch and Qwen (tens of seconds). The next ones reuse the model and only pay for the generation. `/health` and `/search` never load it. `--dtype` is chosen when the server starts, because the model is loaded only once.
-- **Errors are HTTP status codes.** Invalid parameters (empty `query`, `k` of 0 or not a number) give **422** with the reason. A model that cannot be loaded (PyTorch missing, not enough memory) gives **503** with the same message as the CLI, and the server keeps running, so `/search` still works.
+- **Errors are HTTP status codes, never a traceback.** Invalid parameters (an empty `query` or one of only spaces, `k` of 0 or not a number) give **422** with the reason. Every `RagError` (no index yet, a broken index, a model that does not fit in memory) gives **503** with the same message as the CLI, for example `{"detail": "No index found in 'data/processed'. Run 'index' first."}`. The server keeps running and the next request tries again, so running `index` in another terminal is enough, without restarting it.
 - **Local by default.** The server listens on `127.0.0.1`, so only this machine can reach it. `--host 0.0.0.0` opens it to the network, without any authentication.
 
 ### With `make`
@@ -657,7 +657,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 
 ### Tests
 
-`make test` runs **1,178 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
+`make test` runs **1,187 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
 
 - **Chunkers:** exact offsets, no gaps or overlaps, never above the maximum, always progressing. These are checked on random texts and on the whole real corpus. Separator priorities, whole code blocks and decorators are tested too.
 - **BM25:** scores compared with a naive reference implementation of the formula, plus tie-breaking, query stopwords and the save/load round trip.
@@ -665,7 +665,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **`CachedRetriever`:** with a stand-in retriever that counts how often it is built and searched. Covers hits and misses, the wrapped retriever never built when everything is cached, another `k` as another entry, copies returned, the round trip to disk, another namespace, broken, empty or non-UTF-8 files, an unwritable folder, a failed final move that keeps the old file, no rewrite when nothing is new, and the namespace changing with the retriever, its parameters and the index files. Through the CLI: a repeated `search` loads no index, `--cache=False` loads every time, and `index` removes the caches.
 - **`StaticEncoder`:** a tiny real model built inside the test (5-word tokenizer, table of known vectors). Covers the mean and normalisation computed by hand, unknown words, empty texts (zeros, never NaN), and loading from the cache, with a download, or with neither.
 - **Evaluator:** the same numbers as the moulinette.
-- **HTTP API:** with FastAPI's `TestClient`, a small BM25 index and a fake model. Covers `/health`, the JSON of `/search` and `/answer`, 422 for every invalid parameter, no model load without sources or for `/search`, a single load with the server's `dtype` over several answers, 503 when PyTorch or the memory fails (and `/search` still answering), parallel searches that never overlap inside the retriever, and the query cache saved after each request. PyTorch is never imported: the tests replace `src.generator` before the endpoint imports it.
+- **HTTP API:** with FastAPI's `TestClient`, a small BM25 index and a fake model. Covers `/health`, the JSON of `/search` and `/answer`, 422 for every invalid parameter (including a query of only spaces), 503 with the CLI's message for every `RagError` (a missing index, a model that does not fit), an index built while the server runs and used without a restart, no model load without sources or for `/search`, a single load with the server's `dtype` over several answers, 503 when PyTorch fails (and `/search` still answering), parallel searches that never overlap inside the retriever, and the query cache saved after each request. PyTorch is never imported: the tests replace `src.generator` before the endpoint imports it.
 - **CLI:** every command, argument validation, error messages, unknown or private options, exit codes, `--help`, and source paths outside the project.
 - **Mini corpus** in `tests/data`, with easy and hard questions, also run end to end by `make test_rag`.
 

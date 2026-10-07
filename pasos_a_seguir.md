@@ -1,30 +1,31 @@
 # Pasos a seguir: bonus del proyecto RAG
 
-> **Para quien retome esto (otro agente o yo):** lee primero **"Dónde estamos ahora"** justo debajo y luego **"Contexto para quien retome esto"**. Lo que se está haciendo es el **bonus 5 (API HTTP)**, paso 5.4 (al final del fichero). Bonus 1, 2 y 4: hechos (se dejan como historia de cómo se hizo).
+> **Para quien retome esto (otro agente o yo):** lee primero **"Dónde estamos ahora"** justo debajo y luego **"Contexto para quien retome esto"**. Bonus 1, 2, 4 y 5: hechos (se dejan como historia de cómo se hizo). **Siguiente: bonus 3 (indexado incremental)**, luego el cierre.
 
-## Dónde estamos ahora (2026-10-06, noche, en casa)
+## Dónde estamos ahora (2026-10-07, campus)
 
 | Parte | Estado |
 |---|---|
 | Parte obligatoria | ✅ completa (recall@5 con `bm25`: docs 0.870, code 0.758); revisada contra el subject (38 entradas degeneradas sin traceback) |
 | Bonus 1 (embeddings) + 2 (híbrido) | ✅ por defecto `--retriever hybrid`: docs **0.910**, code **0.828** |
 | Bonus 4 (caché) | ✅ arranque en frío (`StaticEncoder`) + caché de búsquedas en disco (`--cache`, un fichero por retriever) |
-| Bonus 5 (API HTTP) | **en curso**: 5.1 ✅, 5.2 ✅ (probado con curl), **siguiente: 5.4 errores** (ver abajo), luego 5.3 `/answer` y 5.5 |
-| Bonus 3 (indexado incremental) | pendiente |
-| Cierre (`.gitignore`, sacar de git PDF/DEVLOG/pasos/.vscode/`dataset_mini_3.json`, repaso, defensa) | pendiente |
+| Bonus 5 (API HTTP) | ✅ `serve` + `/health`, `/search`, `/answer`; errores → 422 / 503; 36 tests; README y DEVLOG (Steps 24–25). **Sin commit** |
+| Bonus 3 (indexado incremental) | **siguiente** |
+| Cierre (`.gitignore`, sacar de git PDF/DEVLOG/pasos/.vscode/`dataset_mini_3.json`, repaso, preparar la demo de la defensa) | pendiente |
 
-Estimación dada al usuario: **~85 %** del proyecto.
+Estimación: **~90 %** del proyecto.
 
-**Último commit:** `bbe3bfa` (caché en disco + `search`/`answer` guardan JSON + revisión del subject). Sin commit: bonus 5.1 y 5.2 (`src/api.py`, `serve` en `commands.py`, `fastapi`/`uvicorn`/`httpx` en `pyproject.toml` y `uv.lock`) y el test de `ArgvGuard` actualizado con `serve`.
+**Último commit:** `6f402fe` (API con `/health` y `/search`). **Sin commit** (el usuario lo hace; mensaje propuesto: `Add /answer, error handling, locks and tests to the HTTP API (bonus 5)`): `src/api.py`, `serve --dtype` y su docstring en `commands.py`, `tests/test_api.py`, `make serve` y cachés de mypy separadas en el `Makefile`, README, DEVLOG.
 
-**Dónde lo dejó el usuario (bonus 5):**
-- `RagApi(retriever)` en `src/api.py` con `GET /health` y `GET /search` (reutiliza `RagCLI._search_question`, `flush()` tras cada búsqueda). `serve --host --port --index_dir --retriever --cache` en `RagCLI` crea el retriever con `_load_retriever` y llama a `uvicorn.run`. Probado: `/health`, `/search` da el mismo JSON que la CLI.
-- **Encontrado:** sin índice, `/search` da **500 con traceback** en el log (el `IndexNotFoundError` no se captura). Siguiente paso = **5.4**: `self.app.exception_handler(RagError)(self._rag_error)` → `JSONResponse(status_code=503, content={"detail": str(error)})`. Esqueleto ya explicado al usuario.
-- Segundo `serve` en un puerto ocupado: sin traceback, pero **exit 3** (código de uvicorn); el proyecto usa 1. Decidir en 5.4.
-- Pendiente probar: `?query=%20%20` (solo espacios) pasa con `Query(min_length=1)`; la CLI lo rechaza. Opción: `StringConstraints(strip_whitespace=True, min_length=1)`.
-- **Lint pendiente** (`make lint` falla): `src/api.py:37` W391 (línea en blanco al final) y `src/commands.py:783` E501 (`index_dir` de `serve`, 80 caracteres). Faltan docstrings de `api.py` y de `serve`, y `description="Placeholder"` en `FastAPI(...)`.
-- Explicado al usuario: HTTP (GET/POST, ruta, código de estado, cuerpo), FastAPI como "el Fire de HTTP", uvicorn, `self.app.get(ruta)(self.metodo)`, por qué `serve` está en `RagCLI` y no en `RagApi`.
-- `data/processed` se vació a las 21:18 (`make cleandata`, probablemente); regenerado con `index`.
+**Cómo quedó el bonus 5 (2026-10-07):**
+- `RagApi(retriever, dtype)` en `src/api.py`. `serve --host --port --index_dir --retriever --dtype --cache` (o `make serve SERVE_ARGS=...`).
+- `GET /answer` (no POST, por coherencia con `/search`): `retriever.search` directamente (necesita el texto de los chunks). Sin fuentes → `NO_SOURCES` sin cargar Qwen. Qwen se carga en el primer `/answer` y se guarda en `self._generator`.
+- `dtype` es del servidor (`serve --dtype`), no de cada petición: el modelo se carga una vez y un `dtype` por petición se ignoraría en silencio.
+- **Dos locks (mutex):** `_retriever_lock` (search + flush: `CachedRetriever` no es thread-safe) y `_generator_lock` (carga + generación). Nunca se cogen a la vez → sin deadlock, y `/search` no espera a una generación.
+- **Errores:** `self.app.exception_handler(RagError)(self._rag_error)` → todo `RagError` es **503** `{"detail": "<mensaje de la CLI>"}`. Sin índice → 503, y si luego se ejecuta `index` funciona sin reiniciar (la caché reintenta la carga). PyTorch que no carga → 503 (`HTTPException`). Parámetros malos → 422; `query` de solo espacios también (`StringConstraints(strip_whitespace=True, min_length=1)`).
+- Puerto ocupado → exit 3 de uvicorn: **se deja así** (decidido por el usuario, no hay traceback).
+- Lentitud de `make lint` resuelta: `lint` y `lint-strict` compartían `.mypy_cache` con flags distintos y se invalidaban (~50 s cada vez). Ahora `.mypy_cache/lint` y `.mypy_cache/strict` (~3 s en caliente). No había procesos zombie; la máquina va justa de RAM (Pylance ~1.9 GB, 2 GB de swap).
+- Tests: 1187 en total, `make lint` y `make lint-strict` limpios.
 
 **Si se continúa en casa:** `data/processed` no está en git. Antes de medir nada hay que ejecutar `uv run -m src index` (crea `index.json`, `vectors.npy`, `owners.npy`, `embeddings.npy`, `tokenizer.json`; ~13 s en el campus, menos en casa). En el campus el entorno está en `/sgoinfre` (`UV_PROJECT_ENVIRONMENT=/sgoinfre/students/saperez-/rag-venv`, `HF_HOME=/sgoinfre/students/saperez-/hf`); en casa serán otros, no hace falta tocarlos.
 
@@ -593,18 +594,28 @@ Elegido por el usuario frente a `http.server` (librería estándar). Motivos:
 - [x] Comando `serve` en `RagCLI` (`uvicorn.run(api.app, host=..., port=...)`).
 - [x] Prueba: `uv run -m src serve` + `curl http://127.0.0.1:8000/health`; `/docs` en el navegador.
 
-### 5.2 — `GET /search` ✅ (falta docstrings y decidir solo-espacios)
-- [x] Parámetros `query` (no vacía) y `k` (> 0) validados por FastAPI; reutilizar `RagCLI._search_question`. Respuesta: `StudentSearchResults`.
+### 5.2 — `GET /search` ✅
+- [x] Parámetros `query` (no vacía, ni solo espacios) y `k` (> 0) validados por FastAPI; reutilizar `RagCLI._search_question`. Respuesta: `StudentSearchResults`.
 - [x] El retriever se crea al arrancar con `_load_retriever` (con caché, no carga nada hasta la primera pregunta nueva).
 - [x] `flush()` tras cada búsqueda (solo escribe si la pregunta era nueva).
+- [x] Docstrings y `description` de la app.
 
-### 5.3 — `POST /answer`
-- [ ] Cuerpo con `query` y `k`; respuesta `StudentSearchResultsAndAnswer`. Sin fuentes → `NO_SOURCES` sin cargar Qwen.
-- [ ] `Generator` cargado una vez, la primera vez que hace falta. FastAPI atiende las rutas síncronas en varios hilos: un `threading.Lock` alrededor de la generación (un solo modelo).
+### 5.3 — `GET /answer` ✅ (GET y no POST, como `/search`)
+- [x] Parámetros `query` y `k`; respuesta `StudentSearchResultsAndAnswer`. Sin fuentes → `NO_SOURCES` sin cargar Qwen.
+- [x] `Generator` cargado una vez, la primera vez que hace falta, con el `dtype` de `serve`.
+- [x] `threading.Lock` alrededor de la carga y la generación, y otro alrededor de search + flush.
 
-### 5.4 — Errores (SIGUIENTE)
-- [ ] `RagError` → JSON `{"detail": "<mensaje>"}` con el código adecuado (índice que falta → 503, entrada mala → 400/422). Nunca un 500 con traceback.
+### 5.4 — Errores ✅
+- [x] `RagError` → 503 `{"detail": "<mensaje>"}` con un manejador global. Nunca un 500 con traceback.
+- [x] Entrada mala (vacía, solo espacios, `k` ≤ 0 o no entero) → 422.
+- [x] Puerto ocupado → exit 3 de uvicorn: se deja así.
 
-### 5.5 — Tests, medidas y documentación
-- [ ] `tests/test_api.py` con `TestClient` (sin Qwen: `Generator` falso).
-- [ ] README (instrucciones de `serve`, ejemplos con `curl`, arquitectura, decisiones) y DEVLOG (Step 24).
+### 5.5 — Tests, medidas y documentación ✅
+- [x] `tests/test_api.py` con `TestClient` (36 tests, sin Qwen ni PyTorch: `Generator` falso y `src.generator` sustituido en `sys.modules`).
+- [x] README (estado, `serve`, sección *HTTP API* con `curl`, tests, decisiones, limitaciones) y DEVLOG (Steps 24–25).
+- [x] `make serve`.
+
+### Siguiente
+- [ ] Commit (lo hace el usuario).
+- [ ] Practicar la demo: `make serve`, `/docs` en el navegador, `curl` desde otra terminal (`/search` y `/answer`), y enseñar un error (503 sin índice, 422 con `k=0`).
+- [ ] Bonus 3: indexado incremental.
