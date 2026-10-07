@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 import pytest
 
 from src.exceptions import IndexNotFoundError, PathError, VectorIndexError
+from src.incremental_indexer import IncrementalIndexer
 from src.models import Chunk
 from src.tokenizer_bm import Tokenizer
 from src.vector_index import VectorIndex
@@ -139,6 +140,98 @@ class TestBuild:
         assert fake_encoder.calls[0] == [
             item.windows[0] for item in VectorIndex._window_chunk(chunks)]
         assert fake_encoder.calls[0][0].endswith("md\nhello\n")
+
+
+def chunk_at(path: str, start: int, text: str) -> Chunk:
+    """A chunk of ``path`` starting at ``start``."""
+    return Chunk(file_path=path, first_character_index=start,
+                 last_character_index=start + len(text), text=text)
+
+
+LONG = "".join(f"line {i} about loading models\n" for i in range(30))
+
+
+class TestUpdate:
+    """``update`` (bonus 3): the same rows as ``build`` over the plan's
+    chunks, embedding only the fresh ones. ``LONG`` has several windows,
+    so the windows of one chunk must stay together and in order."""
+
+    OLD = [chunk_at("a.md", 0, "load the index\n"),
+           chunk_at("a.md", 50, LONG),
+           chunk_at("b.md", 0, "old words here\n"),
+           chunk_at("c.py", 0, LONG)]
+
+    def check(self, to_remove: list[str], new: list[Chunk]) -> VectorIndex:
+        """Update the index of ``OLD`` and compare with a full build."""
+        plan = IncrementalIndexer._plan(self.OLD, to_remove, new)
+        updated = VectorIndex.build(self.OLD).update(plan)
+        full = VectorIndex.build(plan.chunks)
+        assert updated._owners.tolist() == full._owners.tolist()
+        assert np.array_equal(updated._vectors, full._vectors)
+        assert np.array_equal(updated.chunk_score("load a model"),
+                              full.chunk_score("load a model"))
+        return updated
+
+    def test_nothing_changed(self) -> None:
+        """An empty plan gives the same rows."""
+        self.check([], [])
+
+    def test_new_file_shifts_ids(self) -> None:
+        """A new file in the middle: later owners move up by one."""
+        updated = self.check([], [chunk_at("aa.md", 0, LONG)])
+        assert updated.chunk_count == 5
+
+    def test_modified_file(self) -> None:
+        """A modified file is replaced where it was."""
+        self.check(["b.md"], [chunk_at("b.md", 0, "new search text\n")])
+
+    def test_deleted_file(self) -> None:
+        """A deleted file: its rows leave, later owners move down."""
+        updated = self.check(["b.md"], [])
+        assert updated.chunk_count == 3
+
+    def test_all_at_once(self) -> None:
+        """New, modified and deleted together."""
+        self.check(["a.md", "c.py"],
+                   [chunk_at("a.md", 0, LONG), chunk_at("a.md", 900, "x\n"),
+                    chunk_at("aa.md", 0, LONG)])
+
+    def test_only_fresh_embedded(self, fake_encoder: FakeEncoder) -> None:
+        """Only the windows of fresh chunks reach the model: that is the
+        speed-up."""
+        index = VectorIndex.build(self.OLD)
+        fake_encoder.calls.clear()
+        new = [chunk_at("aa.md", 0, "build index\n"),
+               chunk_at("b.md", 0, "new text\n")]
+        index.update(IncrementalIndexer._plan(self.OLD, ["b.md"], new))
+        sent = [text for call in fake_encoder.calls for text in call]
+        assert sent == [item.windows[0]
+                        for item in VectorIndex._window_chunk(new)]
+
+    def test_nothing_fresh_no_model_call(self,
+                                         fake_encoder: FakeEncoder) -> None:
+        """Only removals: nothing is embedded."""
+        index = VectorIndex.build(self.OLD)
+        fake_encoder.calls.clear()
+        index.update(IncrementalIndexer._plan(self.OLD, ["b.md"], []))
+        assert fake_encoder.calls == []
+
+    def test_model_kept(self) -> None:
+        """The new index keeps the loaded model, so it is not loaded
+        again for the first query."""
+        index = VectorIndex.build(self.OLD)
+        plan = IncrementalIndexer._plan(self.OLD, [], [])
+        assert index.update(plan)._model is index._model
+
+    def test_self_unchanged(self) -> None:
+        """The old index is not changed: ``update`` returns a new one."""
+        index = VectorIndex.build(self.OLD)
+        vectors, owners = index._vectors.copy(), index._owners.copy()
+        plan = IncrementalIndexer._plan(
+            self.OLD, ["a.md"], [chunk_at("aa.md", 0, LONG)])
+        assert index.update(plan) is not index
+        assert np.array_equal(index._vectors, vectors)
+        assert np.array_equal(index._owners, owners)
 
 
 class TestChunkScore:

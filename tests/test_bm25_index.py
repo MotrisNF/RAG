@@ -19,6 +19,7 @@ from src.bm25_index import BM25Index
 from src.chunker import FixedSizeChunker
 from src.exceptions import (DatasetError, IndexBuildError,
                             IndexNotFoundError, PathError, RagError)
+from src.incremental_indexer import IncrementalIndexer
 from src.models import Chunk, SearchHit
 from src.reader import CorpusReader
 from src.tokenizer_bm import Tokenizer
@@ -292,6 +293,104 @@ class TestBuild:
         """``main`` handles it as a project error."""
         with pytest.raises(RagError):
             BM25Index.build([])
+
+
+def chunk_at(path: str, start: int, text: str) -> Chunk:
+    """A chunk of ``path`` starting at ``start``."""
+    return Chunk(file_path=path, first_character_index=start,
+                 last_character_index=start + len(text), text=text)
+
+
+class TestUpdate:
+    """``update`` (bonus 3): the same index as ``build`` over the plan's
+    chunks, tokenizing only the fresh ones."""
+
+    OLD = [chunk_at("a.md", 0, "load the index"),
+           chunk_at("a.md", 50, "search the index"),
+           chunk_at("b.md", 0, "old words here"),
+           chunk_at("c.py", 0, "def load(): pass")]
+
+    @staticmethod
+    def assert_same(updated: BM25Index, full: BM25Index) -> None:
+        """Same stored data, so the same scores for any query."""
+        assert updated._chunks == full._chunks
+        assert updated._lengths == full._lengths
+        assert updated._postings == full._postings
+        assert updated._avg_length == full._avg_length
+        assert updated.search("load index", 10) == full.search(
+            "load index", 10)
+
+    def check(self, to_remove: list[str], new: list[Chunk]) -> BM25Index:
+        """Update the index of ``OLD`` and compare with a full build."""
+        plan = IncrementalIndexer._plan(self.OLD, to_remove, new)
+        updated = BM25Index.build(self.OLD).update(plan)
+        self.assert_same(updated, BM25Index.build(plan.chunks))
+        return updated
+
+    def test_nothing_changed(self) -> None:
+        """An empty plan gives the same index."""
+        self.check([], [])
+
+    def test_new_file_shifts_ids(self) -> None:
+        """A new file in the middle: later chunk ids move up in the
+        postings and lengths."""
+        self.check([], [chunk_at("aa.md", 0, "build index fast")])
+
+    def test_modified_file(self) -> None:
+        """A modified file: its old terms leave, its new ones enter."""
+        updated = self.check(["b.md"],
+                             [chunk_at("b.md", 0, "new search text")])
+        assert "old" not in updated._postings
+        assert "new" in updated._postings
+
+    def test_deleted_file(self) -> None:
+        """A deleted file: a term only it had leaves the postings (its
+        IDF would count a chunk that is gone)."""
+        updated = self.check(["b.md"], [])
+        assert "words" not in updated._postings
+
+    def test_all_at_once(self) -> None:
+        """New, modified and deleted together."""
+        self.check(["a.md", "c.py"],
+                   [chunk_at("a.md", 0, "load a model"),
+                    chunk_at("a.md", 9, "and more"),
+                    chunk_at("aa.md", 0, "build index fast")])
+
+    def test_only_fresh_tokenized(self, monkeypatch: pytest.MonkeyPatch
+                                  ) -> None:
+        """Only the fresh chunks are tokenized: that is the speed-up."""
+        index = BM25Index.build(self.OLD)
+        plan = IncrementalIndexer._plan(
+            self.OLD, ["b.md"], [chunk_at("aa.md", 0, "build index"),
+                                 chunk_at("b.md", 0, "new text")])
+        seen: list[str] = []
+        original = BM25Index._chunk_tokens
+
+        def spy(tokenizer: Tokenizer, chunk: Chunk) -> list[str]:
+            seen.append(chunk.text)
+            return original(tokenizer, chunk)
+
+        monkeypatch.setattr(BM25Index, "_chunk_tokens", staticmethod(spy))
+        index.update(plan)
+        assert sorted(seen) == ["build index", "new text"]
+
+    def test_self_unchanged(self) -> None:
+        """The old index is not changed: ``update`` returns a new one."""
+        index = BM25Index.build(self.OLD)
+        postings = {term: dict(ids) for term, ids in index._postings.items()}
+        lengths = list(index._lengths)
+        plan = IncrementalIndexer._plan(self.OLD, ["b.md"], [])
+        assert index.update(plan) is not index
+        assert index._postings == postings
+        assert index._lengths == lengths
+        assert index._chunks == self.OLD
+
+    def test_everything_removed(self) -> None:
+        """No chunk left: the same error as ``build`` with nothing."""
+        plan = IncrementalIndexer._plan(self.OLD, ["a.md", "b.md", "c.py"],
+                                        [])
+        with pytest.raises(IndexBuildError):
+            BM25Index.build(self.OLD).update(plan)
 
 
 class TestIdf:
@@ -625,6 +724,19 @@ class TestRealCorpus:
         overlap = max(0, min(end, 6098) - max(start, 4695))
         union = max(end, 6098) - min(start, 4695)
         assert overlap / union >= 0.05
+
+    def test_update_equals_build(self, real_index: BM25Index) -> None:
+        """Removing some files and moving every other chunk id gives the
+        same index as building it again (bonus 3)."""
+        chunks = real_index._chunks
+        removed = sorted({chunk.file_path for chunk in chunks})[::50]
+        plan = IncrementalIndexer._plan(chunks, removed, [])
+        updated = real_index.update(plan)
+        full = BM25Index.build(plan.chunks)
+        assert updated._lengths == full._lengths
+        assert updated._postings == full._postings
+        query = "How do I load a LoRA adapter?"
+        assert updated.search(query, 10) == full.search(query, 10)
 
     @pytest.mark.skipif(not DATASETS.is_dir(), reason="datasets not present")
     def test_speed_all_public_questions(self,

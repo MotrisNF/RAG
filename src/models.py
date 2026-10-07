@@ -43,6 +43,18 @@ class Chunk(MinimalSource):
 
     text: str
 
+    def order_key(self) -> tuple[str, int]:
+        """The key the index sorts its chunks by: file, then position.
+
+        A chunk id is the chunk's position in the index, so the full and
+        the incremental index must sort the same way to give the same ids.
+        Both use this method, so the order is defined in one place.
+
+        Returns:
+            ``(file_path, first_character_index)``.
+        """
+        return (self.file_path, self.first_character_index)
+
 
 class UnansweredQuestion(BaseModel):
     """A question without its reference answer.
@@ -357,3 +369,29 @@ class CorpusChanges(BaseModel):
             or self.modified
             or self.deleted
         )
+
+
+class IndexPlan(BaseModel):
+    """The chunks of the updated index, and where the old ones went.
+
+    Computed once by ``IncrementalIndexer`` and given to both indexes, so
+    their chunk ids cannot drift apart.
+
+    Attributes:
+        chunks: Every chunk of the updated index, sorted with
+            ``Chunk.order_key`` as a full index would be; a chunk id is
+            its position here.
+        remap: ``{old id: new id}`` of the chunks kept from the saved
+            index; each index moves their data instead of computing it
+            again.
+    """
+
+    chunks: list[Chunk]
+    remap: dict[int, int]
+
+    @property
+    def fresh_ids(self) -> list[int]:
+        """Ids of the chunks that were not in the saved index, in order:
+        the only ones to tokenize and embed."""
+        reused = set(self.remap.values())
+        return [i for i in range(len(self.chunks)) if i not in reused]

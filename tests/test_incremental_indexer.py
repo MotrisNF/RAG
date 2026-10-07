@@ -2,14 +2,17 @@
 
 The models that describe the corpus (``FileStamp``, ``IndexManifest``,
 ``CorpusChanges``) and ``IncrementalIndexer._diff``, which compares the
-saved manifest with the files found now. Nothing here touches the disk:
-the "files" are dictionaries of stamps.
+saved manifest with the files found now; ``IndexPlan`` and
+``IncrementalIndexer._plan``, which renumber the chunks. Nothing here
+touches the disk: the "files" are dictionaries of stamps and the chunks
+are built in memory.
 """
 import pytest
 from pydantic import ValidationError
 
 from src.incremental_indexer import IncrementalIndexer
-from src.models import CorpusChanges, FileStamp, IndexManifest
+from src.models import (Chunk, CorpusChanges, FileStamp, IndexManifest,
+                        IndexPlan)
 
 OLD = FileStamp(mtime_ns=1_000, size=10)
 NEWER = FileStamp(mtime_ns=2_000, size=10)
@@ -19,6 +22,16 @@ BIGGER = FileStamp(mtime_ns=1_000, size=11)
 def no_changes() -> CorpusChanges:
     """Three empty lists."""
     return CorpusChanges(new=[], modified=[], deleted=[])
+
+
+def chunk(path: str, start: int, text: str = "old") -> Chunk:
+    """A one-character chunk of ``path`` starting at ``start``."""
+    return Chunk(file_path=path, first_character_index=start,
+                 last_character_index=start + 1, text=text)
+
+
+OLD_CHUNKS = [chunk("a.md", 0), chunk("a.md", 50), chunk("b.md", 0),
+              chunk("c.py", 0)]
 
 
 class TestFileStamp:
@@ -221,3 +234,126 @@ class TestDiff:
         IncrementalIndexer._diff(old, new)
         assert old == old_copy
         assert new == new_copy
+
+
+class TestIndexPlan:
+    """The chunks of the updated index and their renumbering."""
+
+    def test_fresh_ids_from_values(self) -> None:
+        """Fresh ids are the new ids missing from the remap values, not
+        from its keys: here the old id 2 moved to 3, so 2 is fresh."""
+        plan = IndexPlan(chunks=[chunk("a.md", i) for i in range(4)],
+                         remap={0: 0, 1: 1, 2: 3})
+        assert plan.fresh_ids == [2]
+
+    def test_all_fresh(self) -> None:
+        """Nothing reused: every id is fresh, in order."""
+        plan = IndexPlan(chunks=[chunk("a.md", i) for i in range(3)],
+                         remap={})
+        assert plan.fresh_ids == [0, 1, 2]
+
+    def test_none_fresh(self) -> None:
+        """Every chunk reused: nothing to process."""
+        plan = IndexPlan(chunks=[chunk("a.md", i) for i in range(2)],
+                         remap={5: 0, 7: 1})
+        assert plan.fresh_ids == []
+
+
+class TestPlan:
+    """``_plan``: the kept and new chunks, sorted, and ``{old: new}``."""
+
+    @staticmethod
+    def full_order(kept: list[Chunk], new: list[Chunk]) -> list[Chunk]:
+        """What a full ``index`` would build from the same chunks."""
+        return sorted(kept + new, key=Chunk.order_key)
+
+    def test_nothing_changed(self) -> None:
+        """Same chunks, same ids, nothing to process."""
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, [], [])
+        assert plan.chunks == OLD_CHUNKS
+        assert plan.remap == {0: 0, 1: 1, 2: 2, 3: 3}
+        assert plan.fresh_ids == []
+
+    def test_new_file_shifts_the_rest(self) -> None:
+        """A new file sorted in the middle pushes the later chunks one
+        id up: the case where a wrong remap would go unnoticed."""
+        new = [chunk("aa.md", 0, "new")]
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, [], new)
+        assert plan.chunks == self.full_order(OLD_CHUNKS, new)
+        assert plan.remap == {0: 0, 1: 1, 2: 3, 3: 4}
+        assert plan.fresh_ids == [2]
+        assert plan.chunks[2].text == "new"
+
+    def test_deleted_file(self) -> None:
+        """A deleted file leaves; the later chunks move one id down."""
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, ["b.md"], [])
+        assert [c.file_path for c in plan.chunks] == ["a.md", "a.md",
+                                                      "c.py"]
+        assert plan.remap == {0: 0, 1: 1, 3: 2}
+        assert plan.fresh_ids == []
+
+    def test_modified_same_place(self) -> None:
+        """A modified file is replaced where it was: its old chunk is
+        not reused even with the same position in the file."""
+        new = [chunk("b.md", 0, "new")]
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, ["b.md"], new)
+        assert plan.remap == {0: 0, 1: 1, 3: 3}
+        assert plan.fresh_ids == [2]
+        assert plan.chunks[2].text == "new"
+
+    def test_modified_more_chunks(self) -> None:
+        """A modified file with more chunks than before shifts the rest."""
+        new = [chunk("a.md", start, "new") for start in (0, 30, 60)]
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, ["a.md"], new)
+        kept = [c for c in OLD_CHUNKS if c.file_path != "a.md"]
+        assert plan.chunks == self.full_order(kept, new)
+        assert plan.remap == {2: 3, 3: 4}
+        assert plan.fresh_ids == [0, 1, 2]
+
+    def test_modified_fewer_chunks(self) -> None:
+        """A modified file with fewer chunks: the rest move down."""
+        new = [chunk("a.md", 0, "new")]
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, ["a.md"], new)
+        assert plan.remap == {2: 1, 3: 2}
+        assert plan.fresh_ids == [0]
+
+    def test_no_saved_index(self) -> None:
+        """No saved index: everything is new and sorted (``new_chunks``
+        may come in any order)."""
+        new = [chunk("b.md", 0, "new"), chunk("a.md", 0, "new")]
+        plan = IncrementalIndexer._plan([], [], new)
+        assert [c.file_path for c in plan.chunks] == ["a.md", "b.md"]
+        assert plan.remap == {}
+        assert plan.fresh_ids == [0, 1]
+
+    def test_everything_removed(self) -> None:
+        """Every file removed and nothing new: an empty plan."""
+        plan = IncrementalIndexer._plan(
+            OLD_CHUNKS, ["a.md", "b.md", "c.py"], [])
+        assert plan == IndexPlan(chunks=[], remap={})
+
+    def test_all_at_once(self) -> None:
+        """New, modified and deleted together give the same chunks as a
+        full index, and every kept chunk lands on itself."""
+        new = [chunk("aa.md", 0, "new"), chunk("c.py", 0, "new"),
+               chunk("c.py", 99, "new")]
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, ["b.md", "c.py"], new)
+        kept = OLD_CHUNKS[:2]
+        assert plan.chunks == self.full_order(kept, new)
+        for old_id, new_id in plan.remap.items():
+            assert plan.chunks[new_id] == OLD_CHUNKS[old_id]
+        assert plan.remap == {0: 0, 1: 1}
+        assert plan.fresh_ids == [2, 3, 4]
+
+    def test_remove_unknown_file(self) -> None:
+        """Removing a file that has no chunks (for example, an empty
+        file) changes nothing."""
+        plan = IncrementalIndexer._plan(OLD_CHUNKS, ["empty.md"], [])
+        assert plan.remap == {0: 0, 1: 1, 2: 2, 3: 3}
+
+    def test_inputs_unchanged(self) -> None:
+        """The lists given are only read."""
+        old, new = list(OLD_CHUNKS), [chunk("aa.md", 0, "new")]
+        IncrementalIndexer._plan(old, ["b.md"], new)
+        assert old == OLD_CHUNKS
+        assert new == [chunk("aa.md", 0, "new")]

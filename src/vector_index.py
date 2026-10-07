@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from .exceptions import (IndexNotFoundError, PathError,
                          VectorIndexError)
-from .models import Chunk, WindowChunk
+from .models import Chunk, IndexPlan, WindowChunk
 from .static_encoder import StaticEncoder
 from .tokenizer_bm import Tokenizer
 
@@ -166,22 +166,82 @@ class VectorIndex:
         Raises:
             RagError: The embedding model cannot be loaded.
         """
+        model = cls._load_model()
+        vectors, owners = cls._embed(model, chunks, list(range(len(chunks))))
+        index = cls(vectors, owners)
+        index._model = model
+        return index
+
+    def update(self, plan: IndexPlan) -> "VectorIndex":
+        """Build the index of ``plan`` reusing this one (bonus 3).
+
+        The windows of kept chunks keep their vectors and take the new id
+        of their chunk; those of removed chunks leave. Only the windows of
+        ``plan.fresh_ids`` are embedded. The rows are then sorted by chunk
+        id with a stable sort, which keeps the windows of a chunk in order,
+        so the result equals ``build(plan.chunks)``.
+
+        Args:
+            plan: The chunks of the updated index and ``{old id: new id}``
+                of the kept ones (``IncrementalIndexer._plan``).
+
+        Returns:
+            A new index with this index's model; this one is not changed.
+
+        Raises:
+            RagError: The embedding model cannot be loaded (only if this
+                index has none and there are fresh chunks).
+        """
+        moved = np.array([plan.remap.get(int(owner), -1)
+                          for owner in self._owners], dtype=np.intp)
+        keep = move >= 0
+        vectors = self._vectors[keep]
+        owners = moved[keep]
+
+        if plan.fresh_ids:
+            fresh = [plan.chunks[index] for index in plan.fresh_ids]
+            new_vectors, new_owners = self._embed(
+                self._encoder(),
+                fresh,
+                plan.fresh_ids)
+            vectors = np.concatenate([vectors, new_vectors])
+            owners = np.concatenate([owners, new_owners])
+
+        order = np.argsort(owners, kind="stable")
+        index = VectorIndex(vectors[order], owners[order])
+        index._model = self._model
+
+        return index
+
+    @classmethod
+    def _embed(cls, model: StaticEncoder, chunks: list[Chunk],
+               ids: list[int]) -> tuple[NDArray[np.float32], NDArray[np.intp]]:
+        """Embed the windows of some chunks, ``BATCH_SIZE`` at a time.
+
+        Shared by ``build`` and ``update``, so a chunk gets the same
+        windows and vectors in a full and in an incremental index.
+
+        Args:
+            model: The embedding model.
+            chunks: The chunks to embed.
+            ids: The chunk id of each chunk (``ids[i]`` for ``chunks[i]``):
+                ``0..n-1`` in ``build``, the fresh ids in ``update``.
+
+        Returns:
+            One vector per window and the chunk id of each window, with
+            the windows of each chunk together and in order.
+        """
         window_chunks = cls._window_chunk(chunks)
         counts = [item.windows_count for item in window_chunks]
-        owners = np.repeat(np.arange(len(window_chunks)), counts)
+        owners = np.repeat(np.array(ids), counts)
         texts = [window for item in window_chunks for window in item.windows]
-
-        model = cls._load_model()
         batches = [texts[i:i + cls.BATCH_SIZE]
                    for i in range(0, len(texts), cls.BATCH_SIZE)]
         vectors = np.concatenate(
             [model.encode(batch) for batch in tqdm(
                 batches, desc="Embedding windows", unit="batch")]
             or [np.zeros((0, 0), dtype=np.float32)])
-
-        index = cls(vectors, owners)
-        index._model = model
-        return index
+        return vectors, owners
 
     @classmethod
     def load(cls, files_dir: Path) -> "VectorIndex":

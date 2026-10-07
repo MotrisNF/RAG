@@ -14,7 +14,7 @@ from tqdm import tqdm
 from .base_retriever import Retriever
 from .exceptions import (DatasetError, IndexBuildError, IndexNotFoundError,
                          PathError)
-from .models import Chunk, IndexData, SearchHit
+from .models import Chunk, IndexData, IndexPlan, SearchHit
 from .tokenizer_bm import Tokenizer
 
 
@@ -86,8 +86,7 @@ class BM25Index(Retriever):
 
         progress = tqdm(chunks, desc="Tokenizing chunks", unit="chunk")
         for chunk_id, chunk in enumerate(progress):
-            tokens = tokenizer.tokenize(chunk.text)
-            tokens += tokenizer.tokenize(chunk.file_path)
+            tokens = cls._chunk_tokens(tokenizer, chunk)
             lengths.append(len(tokens))
             for term, count in Counter(tokens).items():
                 posting.setdefault(term, {})[chunk_id] = count
@@ -99,6 +98,73 @@ class BM25Index(Retriever):
             )
 
         return cls(chunks, posting, lengths)
+
+    def update(self, plan: IndexPlan) -> "BM25Index":
+        """Build the index of ``plan`` reusing this one (bonus 3).
+
+        Kept chunks move their lengths and postings to their new id
+        without tokenizing again; removed chunks leave, and so does a term
+        left without chunks. Only ``plan.fresh_ids`` are tokenized. IDF
+        and the average length are recomputed by ``__init__``, so the
+        result equals ``build(plan.chunks)``.
+
+        Args:
+            plan: The chunks of the updated index and ``{old id: new id}``
+                of the kept ones (``IncrementalIndexer._plan``).
+
+        Returns:
+            A new index; this one is not changed.
+
+        Raises:
+            IndexBuildError: There is nothing to index, as in ``build``.
+        """
+        lengths = [0] * len(plan.chunks)
+        for old_id, new_id in plan.remap.items():
+            lengths[new_id] = self._lengths[old_id]
+
+        postings: dict[str, dict[int, int]] = {}
+        for term, counts in self._postings.items():
+            moved = {plan.remap[cid]: n
+                     for cid, n in counts.items()
+                     if cid in plan.remap}
+
+            if moved:
+                postings[term] = moved
+
+        for chunk_id in tqdm(plan.fresh_ids,
+                             desc="Tokenizing chunks",
+                             unit="chunk"):
+            tokens = self._chunk_tokens(self._tokenizer,
+                                        plan.chunks[chunk_id])
+            lengths[chunk_id] = len(tokens)
+            for term, count in Counter(tokens).items():
+                postings.setdefault(term, {})[chunk_id] = count
+
+        if sum(lengths) == 0:
+            raise IndexBuildError(
+                "Nothing to index: the corpus has no searchable text "
+                f"({len(plan.chunks)} chunks, 0 tokens)"
+            )
+
+        return BM25Index(plan.chunks, postings, lengths)
+
+    @staticmethod
+    def _chunk_tokens(tokenizer: Tokenizer, chunk: Chunk) -> list[str]:
+        """The terms a chunk is indexed with: its text and its file path.
+
+        Shared by ``build`` and ``update``, so a chunk gets the same terms
+        in a full and in an incremental index.
+
+        Args:
+            tokenizer: The tokenizer of the index.
+            chunk: The chunk to tokenize.
+
+        Returns:
+            The terms of the text followed by those of the path, with
+            repeats (``Counter`` turns them into occurrences).
+        """
+        return (tokenizer.tokenize(chunk.text)
+                + tokenizer.tokenize(chunk.file_path))
 
     def _idf(self, term: str) -> float:
         """Rarity of a term: ``ln((N - df + 0.5) / (df + 0.5) + 1)``.
