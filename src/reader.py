@@ -1,11 +1,12 @@
 """Read the corpus files that will be indexed."""
+from collections.abc import Collection
 import os
 from pathlib import Path
 
 from tqdm import tqdm
 
 from .exceptions import CorpusError
-from .models import CorpusReadResult, Document
+from .models import CorpusReadResult, Document, FileStamp
 
 
 class CorpusReader:
@@ -90,15 +91,18 @@ class CorpusReader:
             return None
         return Document(file_path=self._relative_path(file), text=text)
 
-    def read(self) -> CorpusReadResult:
-        """Read every valid file of the folder, with a progress bar.
+    def _checked_files(self) -> list[Path]:
+        """Check the corpus folder and list its valid files.
+
+        Shared by every method that walks the corpus, so they all accept
+        and refuse the same folders.
 
         Returns:
-            The documents read and the paths of the skipped files.
+            The files with a valid extension, sorted (``_list_files``).
 
         Raises:
             CorpusError: The folder does not exist, is outside the
-                project root, or has no readable file.
+                project root, or has no file with a valid extension.
         """
         if not self._path_to_read.is_dir():
             raise CorpusError(
@@ -115,18 +119,75 @@ class CorpusReader:
                 "No valid files to read "
                 f"in {self._path_to_read}"
             )
+        return files
 
+    def stamps(self) -> dict[str, FileStamp]:
+        """Size and modification time of every valid file, without
+        reading it.
+
+        Only ``stat`` is called, so this is much faster than ``read``;
+        the incremental ``index`` compares the result with the saved
+        manifest to find what changed. Files ``read`` would skip (not
+        UTF-8) are included: if they change, they are tried again. A
+        file that disappears between listing and ``stat`` is left out,
+        so it counts as deleted.
+
+        Returns:
+            ``{path relative to the project root: FileStamp}``, the same
+            paths as ``Document.file_path``.
+
+        Raises:
+            CorpusError: As ``_checked_files``.
+        """
+        files = self._checked_files()
+        files_stamped: dict[str, FileStamp] = {}
+        for file in files:
+            try:
+                st = file.stat()
+            except OSError:
+                continue
+            files_stamped[self._relative_path(file)] = FileStamp(
+                mtime_ns=st.st_mtime_ns, size=st.st_size)
+        return files_stamped
+
+    def read(self, only: Collection[str] | None = None) -> CorpusReadResult:
+        """Read the valid files of the folder, with a progress bar.
+
+        Args:
+            only: Paths relative to the project root (the keys of
+                ``stamps``) to read; the other files are ignored, and
+                paths that are not in the folder are skipped silently.
+                ``None`` reads every file. The incremental ``index``
+                passes the new and modified files.
+
+        Returns:
+            The documents read and the paths of the skipped files.
+
+        Raises:
+            CorpusError: The folder does not exist, is outside the
+                project root, or has no valid file; or, reading every
+                file, none of them is readable. With ``only``, reading
+                nothing is not an error (an empty list, or every chosen
+                file unreadable, while the rest of the index is fine).
+        """
+        files = self._checked_files()
         files_read: list[Document] = []
         skipped: list[str] = []
+        if only is not None:
+            wanted = frozenset(only)
+            files = [file for file in files
+                     if self._relative_path(file) in wanted]
+
         for file in tqdm(files, desc="Reading corpus", unit="file"):
             document = self._read_file(file)
             if document is not None:
                 files_read.append(document)
             else:
                 skipped.append(self._relative_path(file))
-        if not files_read:
+        if not files_read and only is None:
             raise CorpusError(
                 f"No readable files in {self._path_to_read}: "
                 f"{len(files)} found, none could be read as UTF-8 text"
             )
+
         return CorpusReadResult(documents=files_read, skipped=skipped)

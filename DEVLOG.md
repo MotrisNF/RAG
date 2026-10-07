@@ -666,7 +666,7 @@ Cache file: ~3.7 MB for 100 questions with k = 10 (whole `SearchHit`s, chunk tex
 
 **Plan:** a `RagApi` class (`src/api.py`) that keeps the retriever and the generator loaded between requests, and a `serve` command that starts it on `127.0.0.1` by default.
 
-## Step 25 — Bonus 5: the HTTP API finished (2026-10-07) · uncommitted
+## Step 25 — Bonus 5: the HTTP API finished (2026-10-07) · commits `5a3ad92`, `9963fad`
 
 **What**
 - `RagApi` (`src/api.py`) with `/health`, `/search` and `/answer`, started by `serve` (`--host`, `--port`, `--index_dir`, `--retriever`, `--dtype`, `--cache`) or `make serve`. The endpoints return the same pydantic models as the CLI and save nothing.
@@ -693,6 +693,30 @@ Cache file: ~3.7 MB for 100 questions with k = 10 (whole `SearchHit`s, chunk tex
 - State that is loaded once and shared between requests needs a lock as soon as the server has threads.
 - An endpoint parameter that only matters the first time is a trap: it belongs to the server's configuration.
 - `sys.modules[name] = None` makes `import name` raise `ImportError`: an easy way to test the "PyTorch missing" path without uninstalling anything.
+
+## Step 26 — Bonus 3, part 0: where `index` spends its time (2026-10-07)
+
+**What**
+- Timed each phase of `index` with `time.perf_counter()` (one variable reset before each phase, printed to stderr; removed afterwards), on the real corpus (1,969 files, 20.1 M characters, 12,907 chunks):
+
+| Phase | Time | Share of ~8.1 s |
+|---|---|---|
+| Read the files (`CorpusReader`) | 0.26 s | 3 % |
+| Chunking (`PyChunker`, `MdChunker`) | 0.15 s | 2 % |
+| Tokenize the chunks (`BM25Index.build`) | ~2.4 s | 30 % |
+| Windows + embeddings (`VectorIndex.build`) | ~4.1 s | 50 % |
+| Save both indexes | ~1.2 s | 15 % |
+
+(The last three come from one 7.71 s measurement split with the tqdm bars.)
+
+**Why it matters (for the defense)**
+- Reading and chunking are almost free: comparing dates *before* reading is cleaner, but it is not where the time goes.
+- The cost is **processing the chunks**: embeddings (~4 s) and BM25 tokenizing (~2.4 s). So "re-index only that file" must apply to **both** indexes. Rebuilding BM25 from all chunks would still re-tokenize the whole corpus, which is not what the subject asks.
+- What stays proportional to the corpus, whatever is changed: loading the old index and saving the new one (~1.2 s).
+
+**Learned**
+- `time.perf_counter()`, not `time.time()`: a monotonic clock meant for durations (`time.time()` is wall-clock time and can jump).
+- Measure before designing: my first proposal (rebuild BM25 whole, reuse only the vectors) would have left 30 % of the work untouched.
 
 ## 📍 WHERE I STOPPED (2026-10-03)
 

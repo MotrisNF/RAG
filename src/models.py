@@ -283,3 +283,77 @@ class QueryCache(BaseModel):
 
     namespace: str
     entries: dict[str, list[SearchHit]]
+
+
+class FileStamp(BaseModel):
+    """When a corpus file last changed, to detect changes without
+    reading it.
+
+    Two stamps are equal (``==``, field by field) when the file did not
+    change.
+
+    Attributes:
+        mtime_ns: Last modification time, in nanoseconds
+            (``st_mtime_ns``: an exact integer, unlike the float
+            ``st_mtime``).
+        size: Size in bytes (``st_size``).
+    """
+
+    mtime_ns: int
+    size: int
+
+
+class IndexManifest(BaseModel):
+    """What the saved index was built from (``manifest.json``).
+
+    The next ``index`` compares it with the corpus to re-index only the
+    files that changed. If the parameters differ, no saved chunk can be
+    reused and the index is rebuilt in full.
+
+    Attributes:
+        max_chunk_size: Chunk size the index was built with.
+        raw_dir: Corpus folder the index was built from.
+        files: The stamp of every corpus file, by its path relative to
+            the project root (the same paths as ``Chunk.file_path``).
+    """
+
+    max_chunk_size: int = Field(gt=0, le=2000)
+    raw_dir: str
+    files: dict[str, FileStamp]
+
+
+class CorpusChanges(BaseModel):
+    """Files that changed since the saved index, each list sorted.
+
+    A modified file is handled as removed and then added again, so only
+    two operations are needed: ``to_remove`` and ``to_read``.
+
+    Attributes:
+        new: Files that were not in the index.
+        modified: Files in the index whose stamp changed.
+        deleted: Files in the index that are gone.
+    """
+
+    new: list[str]
+    modified: list[str]
+    deleted: list[str]
+
+    @property
+    def to_remove(self) -> list[str]:
+        """Files whose old chunks leave the index: modified and
+        deleted."""
+        return sorted(self.modified + self.deleted)
+
+    @property
+    def to_read(self) -> list[str]:
+        """Files to read and chunk again: new and modified."""
+        return sorted(self.new + self.modified)
+
+    @property
+    def is_empty(self) -> bool:
+        """True when nothing changed: the index is up to date."""
+        return not (
+            self.new
+            or self.modified
+            or self.deleted
+        )

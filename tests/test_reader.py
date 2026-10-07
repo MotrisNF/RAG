@@ -5,12 +5,13 @@ Most tests build a small fake project in ``tmp_path`` and point
 exactly as in the real project (``data/raw/...``).
 """
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from src.exceptions import CorpusError, RagError
-from src.models import CorpusReadResult, Document
+from src.models import CorpusReadResult, Document, FileStamp
 from src.reader import CorpusReader
 
 REAL_RAW = CorpusReader.PROJECT_ROOT / "data" / "raw"
@@ -476,3 +477,158 @@ class TestProjectPath:
         """Absolute paths and ``..`` leaving the project are refused."""
         with pytest.raises(CorpusError, match="outside the project root"):
             CorpusReader.project_path(path)
+
+
+class TestStamps:
+    """``stamps``: size and time of each file, without reading it."""
+
+    def test_same_files_as_read(self, project: FakeProject) -> None:
+        """The same valid files and paths that ``read`` would see,
+        unreadable ones included."""
+        project.write("a.py")
+        project.write("docs/b.md")
+        project.write("bad.txt", NOT_UTF8)
+        project.write("image.png")
+        stamps = CorpusReader(project.raw).stamps()
+        assert sorted(stamps) == ["data/raw/a.py", "data/raw/bad.txt",
+                                  "data/raw/docs/b.md"]
+
+    def test_values_from_stat(self, project: FakeProject) -> None:
+        """``mtime_ns`` and ``size`` come from the file's ``stat``."""
+        path = project.write("a.py", "12345")
+        os.utime(path, ns=(1_000_000_123, 2_000_000_456))
+        stamp = CorpusReader(project.raw).stamps()["data/raw/a.py"]
+        assert stamp == FileStamp(mtime_ns=2_000_000_456, size=5)
+
+    def test_size_in_bytes(self, project: FakeProject) -> None:
+        """The size counts bytes, not characters."""
+        project.write("a.md", "ñ")
+        assert CorpusReader(project.raw).stamps()["data/raw/a.md"].size == 2
+
+    def test_does_not_read(self, project: FakeProject,
+                           monkeypatch: pytest.MonkeyPatch) -> None:
+        """No file is opened."""
+        project.write("a.py")
+
+        def fail(*args: object, **kwargs: object) -> str:
+            """Reading is not allowed here."""
+            raise AssertionError("stamps read a file")
+        monkeypatch.setattr(Path, "read_text", fail)
+        assert len(CorpusReader(project.raw).stamps()) == 1
+
+    def test_edit_changes_stamp(self, project: FakeProject) -> None:
+        """Rewriting a file with other content changes its stamp."""
+        path = project.write("a.py", "old")
+        os.utime(path, ns=(1, 1))
+        before = CorpusReader(project.raw).stamps()
+        path.write_text("new text", encoding="utf-8")
+        assert CorpusReader(project.raw).stamps() != before
+
+    def test_unchanged_same_stamps(self, project: FakeProject) -> None:
+        """Two calls on an untouched folder give the same stamps."""
+        project.write("a.py")
+        project.write("b.md")
+        reader = CorpusReader(project.raw)
+        assert reader.stamps() == reader.stamps()
+
+    def test_vanished_file_left_out(self, project: FakeProject,
+                                    monkeypatch: pytest.MonkeyPatch
+                                    ) -> None:
+        """A file deleted between listing and ``stat`` is left out (it
+        counts as deleted), without an error."""
+        keep = project.write("keep.py")
+        gone = project.write("gone.py")
+        reader = CorpusReader(project.raw)
+        listed = reader._checked_files()
+        gone.unlink()
+        monkeypatch.setattr(reader, "_checked_files", lambda: listed)
+        assert list(reader.stamps()) == [reader._relative_path(keep)]
+
+    @pytest.mark.parametrize("setup", ["missing", "empty"])
+    def test_same_errors_as_read(self, project: FakeProject,
+                                 setup: str) -> None:
+        """Missing folder or no valid file: the same ``CorpusError``."""
+        folder = project.raw
+        if setup == "missing":
+            folder = project.root / "nope"
+        else:
+            project.write("image.png")
+        with pytest.raises(CorpusError):
+            CorpusReader(folder).stamps()
+
+    def test_outside_project_rejected(self, project: FakeProject,
+                                      tmp_path_factory: pytest.TempPathFactory
+                                      ) -> None:
+        """A folder outside the project root is refused, as by ``read``."""
+        outside = tmp_path_factory.mktemp("outside")
+        (outside / "a.py").write_text("x", encoding="utf-8")
+        with pytest.raises(CorpusError):
+            CorpusReader(outside).stamps()
+
+
+class TestReadOnly:
+    """``read(only=...)``: just the chosen files."""
+
+    @pytest.fixture
+    def reader(self, project: FakeProject) -> CorpusReader:
+        """Reader over three readable files and one that is not."""
+        project.write("a.py", "A")
+        project.write("b.md", "B")
+        project.write("docs/c.txt", "C")
+        project.write("bad.py", NOT_UTF8)
+        return CorpusReader(project.raw)
+
+    def test_only_chosen(self, reader: CorpusReader) -> None:
+        """Only the given paths are read, in folder order."""
+        result = reader.read(only=["data/raw/docs/c.txt", "data/raw/a.py"])
+        assert [d.file_path for d in result.documents] == [
+            "data/raw/a.py", "data/raw/docs/c.txt"]
+        assert [d.text for d in result.documents] == ["A", "C"]
+        assert result.skipped == []
+
+    def test_any_collection(self, reader: CorpusReader) -> None:
+        """A list, a set, a tuple or dict keys are all accepted."""
+        paths = ["data/raw/a.py", "data/raw/b.md"]
+        for only in (paths, set(paths), tuple(paths),
+                     dict.fromkeys(paths).keys()):
+            assert len(reader.read(only=only).documents) == 2
+
+    def test_none_reads_all(self, reader: CorpusReader) -> None:
+        """Without ``only``, every file, as before."""
+        assert reader.read(only=None) == reader.read()
+        assert len(reader.read().documents) == 3
+
+    def test_empty_no_error(self, reader: CorpusReader) -> None:
+        """Nothing to read is not an error."""
+        result = reader.read(only=[])
+        assert result.documents == [] and result.skipped == []
+
+    def test_unknown_path_ignored(self, reader: CorpusReader) -> None:
+        """A path that is not in the folder is ignored."""
+        result = reader.read(only=["data/raw/nope.py", "data/raw/a.py"])
+        assert [d.file_path for d in result.documents] == ["data/raw/a.py"]
+
+    def test_absolute_path_not_matched(self, reader: CorpusReader,
+                                       project: FakeProject) -> None:
+        """Paths are relative to the project root, as in ``stamps``: an
+        absolute one does not match."""
+        absolute = str(project.raw / "a.py")
+        assert reader.read(only=[absolute]).documents == []
+
+    def test_unreadable_chosen_no_error(self, reader: CorpusReader) -> None:
+        """Only unreadable chosen files: skipped, not an error (the rest
+        of the index is still fine)."""
+        result = reader.read(only=["data/raw/bad.py"])
+        assert result.documents == []
+        assert result.skipped == ["data/raw/bad.py"]
+
+    def test_all_unreadable_still_error(self,
+                                        project: FakeProject) -> None:
+        """Reading every file, none readable: still a ``CorpusError``."""
+        project.write("bad.py", NOT_UTF8)
+        with pytest.raises(CorpusError, match="No readable files"):
+            CorpusReader(project.raw).read()
+
+    def test_keys_of_stamps(self, reader: CorpusReader) -> None:
+        """The keys of ``stamps`` read every file, as ``read()``."""
+        assert reader.read(only=reader.stamps()) == reader.read()

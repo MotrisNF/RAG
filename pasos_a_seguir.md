@@ -1,6 +1,21 @@
 # Pasos a seguir: bonus del proyecto RAG
 
-> **Para quien retome esto (otro agente o yo):** lee primero **"Dónde estamos ahora"** justo debajo y luego **"Contexto para quien retome esto"**. Bonus 1, 2, 4 y 5: hechos (se dejan como historia de cómo se hizo). **Siguiente: bonus 3 (indexado incremental)**, luego el cierre.
+> **Para quien retome esto (otro agente o yo):** lee primero **"Dónde estamos ahora"** justo debajo y luego **"Contexto para quien retome esto"**. Bonus 1, 2, 4 y 5: hechos (se dejan como historia de cómo se hizo). **En curso: bonus 3 (indexado incremental), paso 3.4** (al final del fichero), luego el cierre.
+
+## ⏸️ PAUSA (2026-10-07, tarde) — retomar aquí
+
+**Siguiente acción:** paso **3.4a** (`Chunk.order_key`), con la guía completa más abajo, en *Bonus 3 → 3.4*. Lo programa el usuario; el asistente revisa.
+
+**Sin commit** (todo funciona, tests y lint limpios a fecha de la pausa):
+- `src/models.py`: `FileStamp`, `IndexManifest`, `CorpusChanges` (con docstrings).
+- `src/incremental_indexer.py` (nuevo): `IncrementalIndexer._diff`.
+- `src/reader.py`: `_checked_files`, `stamps()`, `read(only=...)`.
+- `src/commands.py`: chunks ordenados en `index` (falta el comentario del porqué; se sustituirá la `lambda` por `Chunk.order_key` en 3.4a).
+- `tests/test_incremental_indexer.py` (nuevo, 40 tests), `tests/test_reader.py` (+19 tests).
+- `DEVLOG.md` (Step 26: medidas de `index`), este fichero.
+- Mensaje de commit propuesto: `Add file stamps, change detection and partial reads for incremental indexing (bonus 3)`.
+
+**Al volver:** `uv run pytest tests/test_incremental_indexer.py tests/test_reader.py -q` (deben pasar 109) y seguir con 3.4a.
 
 ## Dónde estamos ahora (2026-10-07, campus)
 
@@ -9,13 +24,13 @@
 | Parte obligatoria | ✅ completa (recall@5 con `bm25`: docs 0.870, code 0.758); revisada contra el subject (38 entradas degeneradas sin traceback) |
 | Bonus 1 (embeddings) + 2 (híbrido) | ✅ por defecto `--retriever hybrid`: docs **0.910**, code **0.828** |
 | Bonus 4 (caché) | ✅ arranque en frío (`StaticEncoder`) + caché de búsquedas en disco (`--cache`, un fichero por retriever) |
-| Bonus 5 (API HTTP) | ✅ `serve` + `/health`, `/search`, `/answer`; errores → 422 / 503; 36 tests; README y DEVLOG (Steps 24–25). **Sin commit** |
-| Bonus 3 (indexado incremental) | **siguiente** |
+| Bonus 5 (API HTTP) | ✅ `serve` + `/health`, `/search`, `/answer`; errores → 422 / 503; 36 tests; README y DEVLOG (Steps 24–25) |
+| Bonus 3 (indexado incremental) | **en curso**: 3.0–3.3 ✅, **siguiente: 3.4** (ver el final del fichero) |
 | Cierre (`.gitignore`, sacar de git PDF/DEVLOG/pasos/.vscode/`dataset_mini_3.json`, repaso, preparar la demo de la defensa) | pendiente |
 
 Estimación: **~90 %** del proyecto.
 
-**Último commit:** `6f402fe` (API con `/health` y `/search`). **Sin commit** (el usuario lo hace; mensaje propuesto: `Add /answer, error handling, locks and tests to the HTTP API (bonus 5)`): `src/api.py`, `serve --dtype` y su docstring en `commands.py`, `tests/test_api.py`, `make serve` y cachés de mypy separadas en el `Makefile`, README, DEVLOG.
+**Último commit:** `9963fad` (bonus 5 terminado). Sin commit: DEVLOG Step 26 (medidas de `index`) y este fichero.
 
 **Cómo quedó el bonus 5 (2026-10-07):**
 - `RagApi(retriever, dtype)` en `src/api.py`. `serve --host --port --index_dir --retriever --dtype --cache` (o `make serve SERVE_ARGS=...`).
@@ -616,6 +631,124 @@ Elegido por el usuario frente a `http.server` (librería estándar). Motivos:
 - [x] `make serve`.
 
 ### Siguiente
-- [ ] Commit (lo hace el usuario).
+- [x] Commit (`5a3ad92`, `9963fad`).
 - [ ] Practicar la demo: `make serve`, `/docs` en el navegador, `curl` desde otra terminal (`/search` y `/answer`), y enseñar un error (503 sin índice, 422 con `k=0`).
 - [ ] Bonus 3: indexado incremental.
+
+---
+
+# Bonus 3 — Indexado incremental
+
+> *"Incremental indexing: when a file changes, re-index only that file instead of rebuilding the whole index."*
+
+## 3.0 — Dónde se va el tiempo de `index` ✅ (medido 2026-10-07, también en DEVLOG Step 26 para la defensa)
+
+| Fase | Tiempo | % de ~8,1 s |
+|---|---|---|
+| Leer 1969 ficheros | 0,26 s | 3 % |
+| Chunking | 0,15 s | 2 % |
+| Tokenizar (BM25) | ~2,4 s | 30 % |
+| Ventanas + embeddings | ~4,1 s | 50 % |
+| Guardar los dos índices | ~1,2 s | 15 % |
+
+**Conclusión:** lo caro es procesar chunks (tokenizar y embeber), así que **los dos** índices tienen que ser incrementales: reconstruir BM25 entero seguiría tokenizando todo el corpus.
+
+## Diseño (acordado con el usuario)
+
+**Idea del usuario:** guardar cada fichero con su fecha; la próxima vez comparar y sacar tres listas (nuevos, modificados, borrados); quitar los desfasados y borrados e indexar solo los de la lista. Con una **clase intermedia** que hace de puente entre el reader y los índices.
+
+**El problema que hay que resolver:** un `chunk_id` es la **posición** del chunk en la lista. `postings`, `lengths` y `owners.npy` usan ese número. Quitar un chunk desplaza todos los de detrás → resultados malos sin ningún error.
+
+**Solución: un mapa `remap = {id_viejo: id_nuevo}`** para los chunks que se quedan, usado por los dos índices:
+- BM25: filtrar `postings` y `lengths` con el mapa (sin tokenizar nada) + tokenizar solo los chunks nuevos. IDF y longitud media se recalculan solos en `__init__`.
+- Vectores: quedarse con las filas cuyo `owner` está en el mapa, `owner = remap[owner]` + embeber solo los chunks nuevos.
+
+**Decisiones:**
+- Un fichero modificado = quitar sus chunks + añadir los nuevos. Solo hay dos operaciones: **quitar** (modificados ∪ borrados) y **añadir** (nuevos ∪ modificados).
+- Comparar con `stat()` (`st_mtime_ns` + `st_size`, como `_cache_namespace`) **antes** de leer; el reader solo lee nuevos + modificados.
+- Chunks **siempre ordenados** por `(file_path, first_character_index)`, también en el índice completo → el incremental da **exactamente** el mismo índice que uno completo (el mejor test).
+- Guardar también `max_chunk_size` y `raw_dir`: si cambian, índice completo. `--full` para forzarlo (por ejemplo, si cambia el código del chunker, que no se puede detectar).
+- Sin cambios → "Index up to date", no se escribe nada.
+- La caché de búsquedas ya se invalida sola (namespace con las fechas de los ficheros del índice) e `index` la borra.
+
+**Dónde guardar las fechas: fichero aparte `manifest.json` ✅ (decidido por el usuario, 2026-10-07)**
+- En `index_dir`, junto a `index.json` y los `.npy`. Constante `IncrementalIndexer.MANIFEST_NAME = "manifest.json"`.
+- **Borrado al empezar `index` y escrito el último.** Si algo falla a mitad, no hay manifest → la próxima vez se hace un índice completo. Nunca quedan unas fechas que no corresponden a los índices guardados.
+- Descartado: guardarlo dentro de `index.json` (`BM25Index` tendría que llevar datos que no son suyos).
+- Validado con pydantic al leerlo (`IndexManifest.model_validate_json`); roto o ilegible = no hay manifest (índice completo), igual que la caché de búsquedas.
+
+**Clase intermedia: `IncrementalIndexer`** (idea del usuario) en `src/incremental_indexer.py`:
+- `__init__(raw_dir, index_dir, max_chunk_size)`.
+- `_current_stamps()` → `{ruta: FileStamp}` de los ficheros actuales (con `stat`, sin leer).
+- `_load_manifest()` → el `IndexManifest` guardado, o `None` (no hay, roto, o parámetros distintos).
+- `_diff(old, new)` → `CorpusChanges` (estática: fácil de testear sin ficheros).
+- `run(full)` → decide completo o incremental, coordina reader, chunkers e índices, guarda, devuelve un resumen. `RagCLI.index` solo la llama e imprime.
+
+## Pasos
+
+### 3.1 — Modelos y comparación ✅
+- [x] En `models.py`: `FileStamp` (`mtime_ns`, `size`), `IndexManifest` (`max_chunk_size`, `raw_dir`, `files: dict[str, FileStamp]`), `CorpusChanges` (`new`, `modified`, `deleted`, listas ordenadas; propiedades `to_remove`, `to_read`, `is_empty`).
+- [x] `IncrementalIndexer._diff(old, new) -> CorpusChanges` en `src/incremental_indexer.py` (conjuntos de claves + comprehension para los modificados, listas con `sorted`).
+- [x] `tests/test_incremental_indexer.py` (40 tests): los tres modelos (JSON de ida y vuelta, manifest roto, `max_chunk_size` fuera de 1–2000) y `_diff` (nada cambia, nuevo, borrado, modificado por fecha o tamaño, todo a la vez, sin manifest = todo nuevo, corpus vacío, listas ordenadas).
+- [x] Docstrings de `FileStamp`, `IndexManifest`, `CorpusChanges`, del módulo, de `IncrementalIndexer` y de `_diff`.
+
+### 3.2 — El reader: fechas sin leer, y leer solo algunos ✅
+- [x] `_checked_files()`: las comprobaciones de la carpeta, sacadas de `read()` para compartirlas (sin cambiar su comportamiento).
+- [x] `CorpusReader.stamps()` → `{ruta relativa: FileStamp}` con un solo `stat()` por fichero; incluye los no UTF-8; un fichero que desaparece a mitad se omite (cuenta como borrado).
+- [x] `CorpusReader.read(only: Collection[str] | None = None)`: filtra **antes** del bucle (la barra cuenta solo lo leído); `only` vacío o todo ilegible no es error, solo lo es leyendo todo (`only is None`).
+- [x] Tests en `tests/test_reader.py` (`TestStamps`, `TestReadOnly`: 19 tests).
+
+### 3.3 — Orden fijo de los chunks ✅
+- [x] En `index`, chunks ordenados por `(file_path, first_character_index)` antes de construir (antes: todos los `.py` y luego los `.md`/`.txt`).
+- [x] Recall `hybrid` idéntico (docs @1/3/5/10 0.640 / 0.870 / 0.910 / 0.920; code 0.545 / 0.778 / 0.828 / 0.859): solo podían cambiar los empates. `bm25` sin medir (se mide en 3.7).
+- [ ] Comentario de por qué se ordena.
+
+### 3.4 — Un solo `remap` para los dos índices (SIGUIENTE)
+Los dos índices tienen que usar **el mismo** mapa: si cada uno calculara el suyo, un fallo en uno los desalinearía sin error. Lo calcula una vez `IncrementalIndexer` y se lo pasa a los dos.
+- [ ] **3.4a — El orden en un solo sitio (SIGUIENTE):** `Chunk.order_key()` en `models.py` → `(file_path, first_character_index)`; `index` usa `sorted(..., key=Chunk.order_key)`. El incremental usará la misma función.
+
+  **Para qué:** el criterio de orden está ahora en una `lambda` de `index`; el incremental (3.4b) necesita exactamente el mismo. Si se copia y un día cambia uno, incremental y completo dejan de coincidir **sin ningún error**. Solución: que el chunk sepa ordenarse.
+
+  **Qué escribir:**
+  1. En `Chunk` (`models.py`), debajo de `text: str`:
+     ```python
+         def order_key(self) -> tuple[str, int]:
+             """<la clave por la que se ordenan los chunks del índice, y por
+             qué: incremental == completo>"""
+             return ...   # (file_path, first_character_index)
+     ```
+  2. En `index` (`commands.py`): `chunks = sorted(chunkspy + chunksmd, key=Chunk.order_key)` + **comentario del porqué**.
+
+  **Pistas:**
+  - `key=Chunk.order_key` **sin paréntesis**: se pasa la función, `sorted` la llama con cada chunk (`Chunk.order_key(chunk)` == `chunk.order_key()`).
+  - `Chunk` ya está importado en `commands.py`.
+  - Método y no `@property`: `sorted(key=...)` necesita algo que se pueda llamar; con una propiedad habría que volver a la `lambda`.
+
+  **Prueba:**
+  ```bash
+  uv run python -c "
+  from src.models import Chunk
+  a = Chunk(file_path='data/raw/b.py', first_character_index=0, last_character_index=5, text='x')
+  b = Chunk(file_path='data/raw/a.md', first_character_index=900, last_character_index=905, text='y')
+  c = Chunk(file_path='data/raw/a.md', first_character_index=10, last_character_index=15, text='z')
+  print(a.order_key())
+  print([ch.text for ch in sorted([a, b, c], key=Chunk.order_key)])
+  "
+  uv run pytest tests/test_commands.py -q
+  ```
+  **Esperado:** `('data/raw/b.py', 0)`, luego `['z', 'y', 'x']` (mismo fichero: `z` empieza antes; `b.py` va detrás de `a.md`), y los tests pasan. No hace falta reindexar: hace lo mismo que la `lambda`.
+- [ ] **3.4b — El plan:** `IncrementalIndexer._plan(old_chunks, to_remove, new_chunks) -> (chunks, remap)` (estático). `chunks` = viejos que quedan + nuevos, ordenados con `order_key`; `remap = {id_viejo: id_nuevo}` de los que se reutilizan. Todo id nuevo que **no** está en `remap.values()` es un chunk nuevo que hay que procesar. Tests sin ficheros.
+
+### 3.5 — Los índices se actualizan con el plan
+Misma firma en los dos: `update(chunks, remap) -> índice nuevo`.
+- [ ] **3.5a — `BM25Index.update`:** `postings` y `lengths` filtrados y renumerados con `remap` (sin tokenizar); tokenizar solo los ids nuevos. La tokenización de un chunk en un método compartido con `build` (mismos tokens seguro). Test clave: `== BM25Index.build(chunks)`.
+- [ ] **3.5b — `VectorIndex.update`:** filas cuyo `owner` está en `remap`, `owner = remap[owner]`; ventanas y vectores solo de los ids nuevos; filas ordenadas por `owner` (orden estable), como en `build`. Test clave: mismos `vectors` y `owners` que `VectorIndex.build(chunks)`.
+
+### 3.6 — `IncrementalIndexer.run` y la CLI
+- [ ] Coordinar todo; `manifest.json` borrado al empezar y escrito el último.
+- [ ] `index --full`; mensaje `"2 new, 1 modified, 0 deleted: 3 files re-indexed"` / `"Index up to date"`.
+- [ ] Tests de punta a punta en `tmp_path`: crear, modificar, borrar ficheros → igual que un índice completo.
+
+### 3.7 — Medir y documentar
+- [ ] Tiempo de `index` sin cambios, con 1 fichero cambiado y completo (`make` rule para la demo: tocar un fichero y reindexar).
+- [ ] README (estado, comando, diseño, medidas) y DEVLOG.

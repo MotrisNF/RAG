@@ -178,7 +178,10 @@ class RagCLI:
             [doc for doc in result.documents
              if doc.file_path.endswith((".md", ".txt"))]
         )
-        chunks = chunkspy + chunksmd
+        chunks = sorted(
+            chunkspy + chunksmd,
+            key=lambda chunk: (chunk.file_path, chunk.first_character_index)
+            )
 
         print(f"{len(chunks)} chunks (max {max_chunk_size} characters)")
         bm25 = BM25Index.build(chunks)
