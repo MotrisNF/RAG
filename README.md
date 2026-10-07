@@ -41,7 +41,7 @@ The system is judged on two things:
 - **Retrieval quality**, measured with recall@k against reference datasets. The targets are recall@5 ≥ 80 % on documentation questions and ≥ 50 % on code questions.
 - **Answer quality**: answers must be coherent, on point and grounded in the retrieved sources.
 
-Everything is exposed through a command-line interface built with Python Fire: `index`, `search`, `search_dataset`, `answer`, `answer_dataset` and `evaluate`.
+Everything is exposed through a command-line interface built with Python Fire: `index`, `search`, `search_dataset`, `answer`, `answer_dataset` and `evaluate`. The `serve` command also exposes searching and answering over a local HTTP API (bonus 5).
 
 ### Project status
 
@@ -51,7 +51,8 @@ Everything is exposed through a command-line interface built with Python Fire: `
 | Bonus 1: semantic embeddings | ✅ Vector index built with `potion-base-8M` next to the BM25 index |
 | Bonus 2: hybrid retrieval | ✅ BM25 candidates re-ranked with the vector scores (default; `--retriever bm25` gives the lexical search alone) |
 | Bonus 4: caching | ✅ Cold start: the embedding model is saved with the index and run with numpy, so searching never imports PyTorch. Repeated queries: results are cached on disk, so a repeated search loads no index at all (`--cache=False` to turn it off) |
-| Bonus 3: incremental indexing · Bonus 5: local HTTP API | Not started |
+| Bonus 5: local HTTP API | ✅ `serve` starts a FastAPI server on `127.0.0.1` with `/health`, `/search` and `/answer`, which return the same JSON as the CLI. The model is loaded on the first `/answer` and kept for the next ones |
+| Bonus 3: incremental indexing | Not started |
 
 ---
 
@@ -89,7 +90,8 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 .
 ├── src/                 # the Python package, run with: uv run python -m src <command>
 │   ├── __main__.py      # entry point: Fire, error handling and exit codes
-│   ├── commands.py      # RagCLI: the six commands
+│   ├── commands.py      # RagCLI: the six commands and serve
+│   ├── api.py           # RagApi: the local HTTP API (bonus 5)
 │   ├── argv_guard.py    # command-line checks before Fire runs
 │   ├── reader.py        # CorpusReader
 │   ├── chunker.py       # FixedSizeChunker, PyChunker, MdChunker
@@ -125,6 +127,7 @@ uv run -m src <command> --help               # options of a command
 | `answer <query>` | `--k` (10) · `--index_dir` · `--retriever` · `--dtype` (`auto` \| `float32` \| `bfloat16`) · `--cache` · `--save_directory` (`data/output/search_results_and_answer/SingleQuestions`) | `StudentSearchResultsAndAnswer` JSON on stdout and in `<question_id>.json` |
 | `answer_dataset` | `--student_search_results_path` (required) · `--save_directory` (`data/output/search_results_and_answer/UnansweredQuestions`) · `--dtype` | `StudentSearchResultsAndAnswer` JSON, with the same file name as the input |
 | `evaluate` | `--student_search_results_path` (required) · `--dataset_path` (required, an `AnsweredQuestions` file) · `--k` (10) · `--show_failed` | recall@1/3/5/10 report |
+| `serve` | `--host` (`127.0.0.1`) · `--port` (8000) · `--index_dir` · `--retriever` · `--dtype` · `--cache` | A local HTTP API until Ctrl+C (see [HTTP API](#http-api-bonus-5)). Nothing is saved to `data/output` |
 
 - `search` and `answer` print their JSON on stdout and also save it as `<save_directory>/<question_id>.json`. Progress bars and status messages, including where the file was saved, go to stderr, so you can still redirect or pipe the JSON (`> out.json`, `| jq`).
 - Put boolean flags such as `--show_failed` after the paths, or write them as `--show_failed=True`. Otherwise Fire reads the next word as the flag's value.
@@ -138,6 +141,7 @@ uv run -m src <command> --help               # options of a command
 | `make install` | `uv sync` |
 | `make run ARGS="..."` | `uv run -m src $(ARGS)` |
 | `make debug ARGS="..."` | The same, under `pdb` |
+| `make serve SERVE_ARGS="..."` | Starts the HTTP API (`serve`) until Ctrl+C |
 | `make lint` | `flake8 .` and `mypy .` with the subject's flags |
 | `make lint-strict` | `flake8 .` and `mypy . --strict` |
 | `make test` | The pytest suite |
@@ -245,6 +249,33 @@ $ uv run -m src evaluate \
     --dataset_path data/datasets/AnsweredQuestions/dataset_code_public.json \
     --show_failed
 ```
+
+### HTTP API (bonus 5)
+
+```console
+$ uv run -m src serve                       # or: make serve
+http://127.0.0.1:8000/docs
+```
+
+The index is loaded at start-up. Open `http://127.0.0.1:8000/docs` for an interactive page that tries every endpoint from the browser, or call them from any other program, for example `curl` in another terminal:
+
+```console
+$ curl "http://127.0.0.1:8000/health"
+{"status":"ok"}
+$ curl -G "http://127.0.0.1:8000/search" --data-urlencode "query=How do I load a LoRA adapter?" -d k=5
+$ curl -G "http://127.0.0.1:8000/answer" --data-urlencode "query=What is the minimum version of bitsandbytes required for vLLM quantization?"
+```
+
+| Endpoint | Parameters | Response |
+|---|---|---|
+| `GET /health` | none | `{"status": "ok"}` |
+| `GET /search` | `query` (required, not empty) · `k` (10, > 0) | `StudentSearchResults`, as the `search` command |
+| `GET /answer` | `query` (required, not empty) · `k` (10, > 0) | `StudentSearchResultsAndAnswer`, as the `answer` command |
+
+- **Same JSON as the CLI.** The endpoints return the same pydantic models, so the output can be fed to `evaluate` like the files the commands save. The API itself saves nothing.
+- **The model is loaded once.** The first `/answer` loads PyTorch and Qwen (tens of seconds). The next ones reuse the model and only pay for the generation. `/health` and `/search` never load it. `--dtype` is chosen when the server starts, because the model is loaded only once.
+- **Errors are HTTP status codes.** Invalid parameters (empty `query`, `k` of 0 or not a number) give **422** with the reason. A model that cannot be loaded (PyTorch missing, not enough memory) gives **503** with the same message as the CLI, and the server keeps running, so `/search` still works.
+- **Local by default.** The server listens on `127.0.0.1`, so only this machine can reach it. `--host 0.0.0.0` opens it to the network, without any authentication.
 
 ### With `make`
 
@@ -626,7 +657,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 
 ### Tests
 
-`make test` runs **1,151 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
+`make test` runs **1,178 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
 
 - **Chunkers:** exact offsets, no gaps or overlaps, never above the maximum, always progressing. These are checked on random texts and on the whole real corpus. Separator priorities, whole code blocks and decorators are tested too.
 - **BM25:** scores compared with a naive reference implementation of the formula, plus tie-breaking, query stopwords and the save/load round trip.
@@ -634,6 +665,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **`CachedRetriever`:** with a stand-in retriever that counts how often it is built and searched. Covers hits and misses, the wrapped retriever never built when everything is cached, another `k` as another entry, copies returned, the round trip to disk, another namespace, broken, empty or non-UTF-8 files, an unwritable folder, a failed final move that keeps the old file, no rewrite when nothing is new, and the namespace changing with the retriever, its parameters and the index files. Through the CLI: a repeated `search` loads no index, `--cache=False` loads every time, and `index` removes the caches.
 - **`StaticEncoder`:** a tiny real model built inside the test (5-word tokenizer, table of known vectors). Covers the mean and normalisation computed by hand, unknown words, empty texts (zeros, never NaN), and loading from the cache, with a download, or with neither.
 - **Evaluator:** the same numbers as the moulinette.
+- **HTTP API:** with FastAPI's `TestClient`, a small BM25 index and a fake model. Covers `/health`, the JSON of `/search` and `/answer`, 422 for every invalid parameter, no model load without sources or for `/search`, a single load with the server's `dtype` over several answers, 503 when PyTorch or the memory fails (and `/search` still answering), parallel searches that never overlap inside the retriever, and the query cache saved after each request. PyTorch is never imported: the tests replace `src.generator` before the endpoint imports it.
 - **CLI:** every command, argument validation, error messages, unknown or private options, exit codes, `--help`, and source paths outside the project.
 - **Mini corpus** in `tests/data`, with easy and hard questions, also run end to end by `make test_rag`.
 
@@ -656,6 +688,9 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **The lexical method is always available.** `--retriever bm25` runs the mandatory method alone and never loads the vector index.
 - **Stopwords on the query only**, so the list can change without rebuilding the index.
 - **Paths relative to the project root**, written exactly as in the corpus (`data/raw/vllm-0.10.1/...`), because the grader compares them verbatim.
+- **FastAPI for the HTTP API**, not the standard library's `http.server`. The project already describes every input and output with pydantic models, and FastAPI validates the requests and serialises the responses with those same models, so the API returns exactly the CLI's JSON without building it by hand. Routing, validation (422) and the `/docs` page come with the framework.
+- **The API keeps everything loaded between requests.** The retriever is loaded when the server starts, and the model on the first `/answer`, so later requests skip the cold start that each CLI command pays.
+- **Two locks (mutexes) in the API.** FastAPI runs each request in its own thread, so two requests can arrive at once. One lock lets a single search (with its cache write) run at a time, because two writers would corrupt the query cache. The other loads the model once and generates one answer at a time, because two generations at once would double the memory. They are never held together, so a `/search` does not wait for an answer being generated, and they cannot deadlock.
 - **Lazy import and single load of Qwen.** Only `answer` and `answer_dataset` pay for PyTorch, and only once per command.
 - **float32 on CPU when it fits.** It reads the prompt ~3× faster than bfloat16. The type is chosen before loading, so a smaller machine gets a slower answer instead of a killed process.
 - **A prompt for a small model.** Few positive instructions, examples instead of rules, the question after the context, a fixed refusal sentence that is easy to detect, and greedy decoding so answers are reproducible.
@@ -693,6 +728,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **Tuned on the public datasets.** The hybrid parameters come from a stable plateau, but the private datasets may show a smaller gain.
 - **A 0.6B model.** It sometimes picks a value from a similar but wrong chunk, and it is sensitive to the exact mix of chunks in its context. The full-dataset answer evaluation was done with BM25 retrieval; with the hybrid retriever, a different set of chunks reaches the model.
 - **Grounded is not always correct.** In one case the model quoted vLLM's own assertion message, which contradicts the condition next to it (`vllm/v1/core/kv_cache_coordinator.py`).
+- **One answer at a time in the API.** Requests to `/answer` are served one after another, so a second user waits for the first answer. That is enough for a local server, and running them in parallel on a CPU would not be faster.
 - **Memory check in containers.** The check reads the memory of the whole machine (`/proc/meminfo`). Inside a container or cgroup with its own limit, it can overestimate what is available.
 
 ---

@@ -33,8 +33,18 @@ run:
 debug:
 	uv run python -m pdb -m src $(ARGS)
 
+# Local HTTP API (bonus 5) until Ctrl+C; try it at http://127.0.0.1:8000/docs
+# Options for `serve`: SERVE_ARGS="--port 8080 --retriever bm25"
+SERVE_ARGS ?=
+
+serve:
+	@uv run -m src serve $(SERVE_ARGS)
+
+# Each rule keeps its own mypy cache: the cache is only valid for the
+# flags that built it, so sharing one made every switch between lint and
+# lint-strict re-check torch, transformers... from scratch (~50 s, not ~2 s).
 lint:
-	uv run -m flake8 . && uv run -m mypy \
+	uv run -m flake8 . && uv run -m mypy --cache-dir .mypy_cache/lint \
 	--warn-return-any \
 	--warn-unused-ignores \
 	--ignore-missing-imports \
@@ -43,7 +53,7 @@ lint:
 	.
 
 lint-strict:
-	uv run -m flake8 . && uv run -m mypy --strict .
+	uv run -m flake8 . && uv run -m mypy --cache-dir .mypy_cache/strict --strict .
 
 test:
 	uv run pytest
@@ -215,4 +225,4 @@ cleandata:
 	@find $(BASE_DATA)/output -type f -name '*.json' -delete
 	@echo "Index and generated outputs removed"
 
-.PHONY: all install run debug lint lint-strict test test_rag test_rag_base test_index test_retrieval test_limits test_limits_cached test_answer test_answer_dataset clean cleandata
+.PHONY: all install run debug serve lint lint-strict test test_rag test_rag_base test_index test_retrieval test_limits test_limits_cached test_answer test_answer_dataset clean cleandata

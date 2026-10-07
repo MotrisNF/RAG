@@ -784,11 +784,35 @@ class RagCLI:
                   str,
                   Field(min_length=1)] = "data/processed",
               retriever: RetrieverMode = "hybrid",
+              dtype: DtypeMode = "auto",
               cache: bool = True
               ) -> None:
+        """Start the local HTTP API (bonus 5) until Ctrl+C.
+
+        Endpoints: ``/health``, ``/search`` and ``/answer``, with the same
+        JSON as the commands of the same name (nothing is saved to disk);
+        ``/docs`` is an interactive page to try them. The index is loaded
+        now; the model on the first ``/answer``, then kept.
+
+        Args:
+            host: Address to listen on. The default only accepts
+                connections from this machine.
+            port: Port to listen on.
+            index_dir: Folder where the index command saved the index.
+            retriever: ``hybrid`` reranks the BM25 results with the vector
+                index (better recall); ``bm25`` uses the words only.
+            dtype: How to load the model. ``auto`` chooses float32 or
+                bfloat16 from the available memory; ``float32`` or
+                ``bfloat16`` force it, without the memory check (for
+                testing).
+            cache: Reuse the results of questions already searched with
+                the same index and retriever (``--cache=False`` to search
+                again).
+        """
         import uvicorn
         from .api import RagApi
 
-        api = RagApi(self._load_retriever(index_dir, retriever, cache))
+        api = RagApi(self._load_retriever(index_dir, retriever, cache),
+                     dtype)
         print(f"http://{host}:{port}/docs", file=sys.stderr)
         uvicorn.run(api.app, host=host, port=port)

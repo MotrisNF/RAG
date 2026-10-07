@@ -666,6 +666,32 @@ Cache file: ~3.7 MB for 100 questions with k = 10 (whole `SearchHit`s, chunk tex
 
 **Plan:** a `RagApi` class (`src/api.py`) that keeps the retriever and the generator loaded between requests, and a `serve` command that starts it on `127.0.0.1` by default.
 
+## Step 25 — Bonus 5: the HTTP API finished (2026-10-07) · uncommitted
+
+**What**
+- `RagApi` (`src/api.py`) with `/health`, `/search` and `/answer`, started by `serve` (`--host`, `--port`, `--index_dir`, `--retriever`, `--dtype`, `--cache`) or `make serve`. The endpoints return the same pydantic models as the CLI and save nothing.
+- **`/answer` fixed.** My first version built a `StudentSearchResults` and then used it as the list of hits: `if results:` was always true (a pydantic model is always truthy), `for hit in results` walked the model's *fields*, and `_search_question` only keeps locations, not the chunk text the model needs. Now it calls `retriever.search` directly, like the `answer` command.
+- **The model is loaded once**, on the first `/answer` (`_get_generator`), and kept in `self._generator`. Creating `Generator()` per request cost 20–40 s every time. `/health` and `/search` never load it.
+- **`dtype` belongs to the server, not to each request.** I had put it as a parameter of `/answer`, but the model is loaded only once: a later request with another `dtype` would have been silently ignored. Back to `serve --dtype`.
+- **Errors as HTTP codes.** A `RagError` inside an endpoint becomes a 500 with no explanation; PyTorch missing or not enough memory now give **503** with the message, and the server keeps running (the next `/answer` tries again). Invalid parameters give 422 (FastAPI, from the `Query` constraints).
+- **Two locks (mutexes)**, see below.
+- Docstrings (FastAPI shows them in `/docs`), a real `description`, the `serve` docstring.
+- `tests/test_api.py`: 27 tests with `TestClient`, a small BM25 index and a fake generator. A failed load is simulated by putting a fake `src.generator` (or `None`, which makes the import fail) in `sys.modules`, so PyTorch is never imported. Suite: 1,178 tests.
+- README: status, layout, command reference, Makefile, *HTTP API* section with `curl` examples, tests, design decisions, limitations.
+
+**Why the locks**
+- FastAPI runs every plain `def` endpoint in a thread pool: two requests at once run the same `RagApi` methods at the same time, on the same objects.
+- `CachedRetriever` is not thread-safe: one thread adding to `_entries` while another serialises it in `flush` → `RuntimeError: dictionary changed size during iteration`; both writing the same `.tmp` file; the index loaded twice.
+- The model: two first requests would load it twice (double memory, maybe `Killed`), and two generations at once double the memory too.
+- `threading.Lock` is a mutex: one thread inside at a time, the others wait at the `with`. `with` releases it even on an exception (no deadlock from a forgotten `release`).
+- **Two locks, not one:** `_retriever_lock` (search + flush, milliseconds) and `_generator_lock` (load + generate, seconds). With one, `/search` would wait for a whole generation. They are never held at the same time (the first is released before taking the second), so they cannot deadlock.
+
+**Learned**
+- A pydantic model is always truthy and iterating it gives `(field, value)` pairs: check the *list*, not the wrapper.
+- State that is loaded once and shared between requests needs a lock as soon as the server has threads.
+- An endpoint parameter that only matters the first time is a trap: it belongs to the server's configuration.
+- `sys.modules[name] = None` makes `import name` raise `ImportError`: an easy way to test the "PyTorch missing" path without uninstalling anything.
+
 ## 📍 WHERE I STOPPED (2026-10-03)
 
 The **retrieval** part is complete and above the targets (docs 0.87, code 0.758 recall@5). Next: **generation** (`Generator`, `answer`, `answer_dataset`). First step: `torch` CPU-only + `transformers` in `pyproject.toml`.
@@ -780,7 +806,8 @@ Measured on the real corpus (2000): chunks ending with a decorator line **406 �
 - [x] Semantic embeddings (`potion-base-8M` instead of MiniLM: time limit) and hybrid retrieval (re-ranking instead of reciprocal rank fusion): Step 21.
 - [x] `Retriever` base class (Step 22).
 - [x] Caching: cold start (Step 22, model with numpy) and query-result cache (Step 23, `CachedRetriever`).
-- [ ] Local HTTP API (Step 24: FastAPI + uvicorn), then incremental indexing.
+- [x] Local HTTP API (Steps 24–25: FastAPI + uvicorn, `serve`, `/health`, `/search`, `/answer`). Pending: practise the demo (`/docs` + `curl` from another terminal).
+- [ ] Incremental indexing (bonus 3).
 
 **Final**
 - [ ] Edge cases, timings, README, `.gitignore` uncommented before delivery (no `data/`, PDF, `guia/`).
