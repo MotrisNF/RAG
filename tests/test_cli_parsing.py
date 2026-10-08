@@ -4,6 +4,7 @@ Each test calls Fire exactly as the terminal would, passing the arguments
 as a list. They only check parsing and validation, not what each command
 does.
 """
+import json
 from pathlib import Path
 
 import fire
@@ -144,14 +145,71 @@ class TestWrongUsage:
     @pytest.mark.parametrize("command", [
         ["search"],
         ["answer"],
-        ["answer_dataset"],
-        ["evaluate", "--dataset_path", DOCS_ANSWERED],
         ["not_a_command"],
     ])
     def test_usage_error(self, command: list[str]) -> None:
         """Fire exits with a usage error."""
         with pytest.raises(SystemExit):
             fire.Fire(RagCLI, command=command)
+
+
+class TestDefaultPaths:
+    """The dataset commands run without options: their input files have
+    defaults (the public docs dataset and what ``search_dataset`` writes
+    from it).
+
+    The tests run from an empty folder, where the default files do not
+    exist: the command must stop with an ``ArgError`` naming the default
+    path, before anything is loaded (``answer_dataset`` never reaches the
+    model).
+    """
+
+    @pytest.mark.parametrize("command, option, default", [
+        (["search_dataset"], "--dataset_path",
+         "data/datasets/UnansweredQuestions/dataset_docs_public.json"),
+        (["answer_dataset"], "--student_search_results_path",
+         "data/output/search_results/UnansweredQuestions/"
+         "dataset_docs_public.json"),
+        (["evaluate", "--dataset_path", str(Path.cwd() / DOCS_ANSWERED)],
+         "--student_search_results_path",
+         "data/output/search_results/UnansweredQuestions/"
+         "dataset_docs_public.json"),
+        (["evaluate", "--student_search_results_path",
+          str(Path.cwd() / DOCS_DATASET)], "--dataset_path",
+         "data/datasets/AnsweredQuestions/dataset_docs_public.json"),
+    ])
+    def test_missing_default_file(self, command: list[str], option: str,
+                                  default: str, tmp_path: Path,
+                                  monkeypatch: pytest.MonkeyPatch) -> None:
+        """A default that does not exist is an argument error that names
+        the option and the default path, not a crash."""
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ArgError) as error:
+            fire.Fire(RagCLI, command=command)
+        message = str(error.value)
+        assert option in message
+        assert default in message
+
+    def test_default_used(self, tmp_path: Path,
+                          monkeypatch: pytest.MonkeyPatch,
+                          capsys: pytest.CaptureFixture[str]) -> None:
+        """``evaluate`` with no option reads the two default files."""
+        root = Path.cwd()
+        monkeypatch.chdir(tmp_path)
+        for source in (DOCS_DATASET, DOCS_ANSWERED):
+            target = tmp_path / source
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((root / source).read_bytes())
+        results = (tmp_path / "data/output/search_results/"
+                   "UnansweredQuestions/dataset_docs_public.json")
+        results.parent.mkdir(parents=True)
+        dataset = json.loads((root / DOCS_DATASET).read_text("utf-8"))
+        results.write_text(json.dumps({"k": 10, "search_results": [
+            {"question_id": q["question_id"], "question": q["question"],
+             "retrieved_sources": []}
+            for q in dataset["rag_questions"]]}), encoding="utf-8")
+        fire.Fire(RagCLI, command=["evaluate"])
+        assert "Recall@1: 0.000" in capsys.readouterr().out
 
 
 class TestUnknownFlag:

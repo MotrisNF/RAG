@@ -32,6 +32,16 @@ from .vector_index import VectorIndex
 from .hybrid_retriever import HybridRetriever
 from .incremental_indexer import IncrementalIndexer
 
+# Defaults of the dataset commands, so that search_dataset, answer_dataset
+# and evaluate run one after the other without options: the results of
+# search_dataset are where answer_dataset and evaluate look for them.
+DEFAULT_DATASET = "dataset_docs_public.json"
+DATASET_QUESTIONS = (Path("data/datasets/UnansweredQuestions")
+                     / DEFAULT_DATASET)
+DATASET_ANSWERS = Path("data/datasets/AnsweredQuestions") / DEFAULT_DATASET
+SEARCH_RESULTS = (Path("data/output/search_results/UnansweredQuestions")
+                  / DEFAULT_DATASET)
+
 F = TypeVar("F", bound=Callable[..., Any])
 M = TypeVar("M", bound=BaseModel)
 
@@ -39,9 +49,13 @@ M = TypeVar("M", bound=BaseModel)
 class CliCommand:
     """Decorator that turns a method into a validated CLI command."""
 
+    # validate_default: defaults are checked like given values, so a
+    # default FilePath arrives as a Path and a missing default file is a
+    # clear argument error, not a crash inside the command.
     CONFIG = ConfigDict(
         coerce_numbers_to_str=True,
-        str_strip_whitespace=True
+        str_strip_whitespace=True,
+        validate_default=True
     )
 
     @staticmethod
@@ -431,7 +445,7 @@ class RagCLI:
     @CliCommand.validated
     def search_dataset(
             self,
-            dataset_path: FilePath,
+            dataset_path: FilePath = DATASET_QUESTIONS,
             k: Annotated[int, Field(gt=0)] = 10,
             save_directory: Annotated[
                 str,
@@ -445,6 +459,8 @@ class RagCLI:
 
         Args:
             dataset_path: JSON file with the questions (RagDataset).
+                Default: the public docs dataset,
+                ``data/datasets/UnansweredQuestions/dataset_docs_public.json``.
             k: Number of sources to return per question.
             save_directory: Folder where the StudentSearchResults file is
                 written, with the same file name as the dataset.
@@ -547,7 +563,7 @@ class RagCLI:
     @CliCommand.validated
     def answer_dataset(
             self,
-            student_search_results_path: FilePath,
+            student_search_results_path: FilePath = SEARCH_RESULTS,
             save_directory: Annotated[
                 str,
                 Field(min_length=1)
@@ -559,7 +575,9 @@ class RagCLI:
 
         Args:
             student_search_results_path: JSON file written by search_dataset
-                (StudentSearchResults).
+                (StudentSearchResults). Default: what search_dataset writes
+                with its defaults, ``data/output/search_results/``
+                ``UnansweredQuestions/dataset_docs_public.json``.
             save_directory: Folder where the StudentSearchResultsAndAnswer
                 file is written, with the same file name as the input.
             dtype: How to load the model, as in ``answer``.
@@ -635,8 +653,8 @@ class RagCLI:
     @CliCommand.validated
     def evaluate(
             self,
-            student_search_results_path: FilePath,
-            dataset_path: FilePath,
+            student_search_results_path: FilePath = SEARCH_RESULTS,
+            dataset_path: FilePath = DATASET_ANSWERS,
             k: Annotated[int, Field(gt=0)] = 10,
             show_failed: bool = False
             ) -> None:
@@ -648,8 +666,12 @@ class RagCLI:
 
         Args:
             student_search_results_path: JSON file written by search_dataset.
+                Default: what search_dataset writes with its defaults,
+                ``data/output/search_results/UnansweredQuestions/``
+                ``dataset_docs_public.json``.
             dataset_path: JSON file with the correct sources
-                (AnsweredQuestions).
+                (AnsweredQuestions). Default: the public docs dataset,
+                ``data/datasets/AnsweredQuestions/dataset_docs_public.json``.
 
             k: Largest k for which recall is reported.
             show_failed: List every question not found within the first k
