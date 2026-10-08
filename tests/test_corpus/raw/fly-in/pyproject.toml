@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fly-in"
+version = "1.0.0"
+description = "Turn-based drone routing simulator with a pygame visualisation (42 Cursus, Milestone 3)."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "saperez-" }]
+dependencies = [
+    "pygame==2.6.1",
+    "pydantic==2.13.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy==2.3.1",
+    "flake8==7.3.0",
+    "flake8-pyproject==1.2.3",
+    "pytest==9.1.1",
+]
+
+# The deliverable is a set of flat top-level modules (they import each
+# other by bare name, e.g. ``from constants import ...``). They live
+# under ``src/`` and are exposed on ``sys.path`` via ``package-dir``,
+# so an editable install keeps those imports working untouched.
+[tool.setuptools]
+py-modules = [
+    "constants",
+    "drone",
+    "exceptions",
+    "initiate_simulation",
+    "main",
+    "map_config",
+    "parser",
+    "performance",
+    "routing",
+    "show_simulation",
+    "starter",
+    "text_printer",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.flake8]
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    "build",
+    "dist",
+]
+
+[tool.mypy]
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+disallow_untyped_defs = true
+check_untyped_defs = true

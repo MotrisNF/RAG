@@ -2,11 +2,13 @@
 
 # RAG against the machine
 
-> A Retrieval-Augmented Generation system that answers questions about the vLLM codebase. It runs entirely on CPU, with a BM25 search engine written from scratch, a semantic re-ranker and a small local language model (Qwen3-0.6B).
+> A Retrieval-Augmented Generation system that answers questions about the vLLM codebase. It runs entirely on CPU, with a BM25 search engine written from scratch, a semantic re-ranker, a small local language model (Qwen3-0.6B), a query cache, incremental indexing and a local HTTP API.
 
 | Retrieval (recall@5, moulinette) | Indexing | Retrieval speed | Generation |
 |---|---|---|---|
-| **docs 91.0 %** (target 80 %) · **code 82.8 %** (target 50 %) | ~13 s for 1,969 files (limit 5 min) | 199 questions in ~5.4 s (limit 90 s for 200), ~0.7 s when cached | ~17–22 s per answer on CPU · 76 % correct or partial on the docs dataset |
+| **docs 91.0 %** (target 80 %) · **code 82.8 %** (target 50 %) | ~13 s for 1,969 files (limit 5 min) · ~1.4 s after editing one file | 199 questions in ~5.4 s (limit 90 s for 200), ~0.7 s when cached | ~17–22 s per answer on CPU · 76 % correct or partial on the docs dataset |
+
+On a second project it was never tuned on (the Fly-in simulator, 92 handwritten questions), recall@5 is **75.5 %** on code and **74.4 %** on docs, and a correct source is in the top 10 for **88 %** of the questions (see [A second corpus](#a-second-corpus-fly-in)).
 
 ## Table of contents
 
@@ -43,6 +45,8 @@ The system is judged on two things:
 
 Everything is exposed through a command-line interface built with Python Fire: `index`, `search`, `search_dataset`, `answer`, `answer_dataset` and `evaluate`. The `serve` command also exposes searching and answering over a local HTTP API (bonus 5).
 
+All five bonuses are implemented. The system was also measured on a second, independent corpus with its own handwritten datasets, to check that it is not only fitted to vLLM.
+
 ### Project status
 
 | Part | Status |
@@ -50,9 +54,11 @@ Everything is exposed through a command-line interface built with Python Fire: `
 | Mandatory part | ✅ Complete: the six commands work end to end, and every target is met by both retrievers |
 | Bonus 1: semantic embeddings | ✅ Vector index built with `potion-base-8M` next to the BM25 index |
 | Bonus 2: hybrid retrieval | ✅ BM25 candidates re-ranked with the vector scores (default; `--retriever bm25` gives the lexical search alone) |
+| Bonus 3: incremental indexing | ✅ `index` compares each file's size and modification time with `manifest.json` and only reads, tokenizes and embeds the new and modified files; the chunks of modified and deleted files leave both indexes. The result is identical to a full index. `--full` forces a full one |
 | Bonus 4: caching | ✅ Cold start: the embedding model is saved with the index and run with numpy, so searching never imports PyTorch. Repeated queries: results are cached on disk, so a repeated search loads no index at all (`--cache=False` to turn it off) |
 | Bonus 5: local HTTP API | ✅ `serve` starts a FastAPI server on `127.0.0.1` with `/health`, `/search` and `/answer`, which return the same JSON as the CLI. The model is loaded on the first `/answer` and kept for the next ones |
-| Bonus 3: incremental indexing | ✅ `index` compares each file's size and modification time with `manifest.json` and only reads, tokenizes and embeds the new and modified files; the chunks of modified and deleted files leave both indexes. The result is identical to a full index. `--full` forces a full one |
+| Robustness | ✅ No traceback on degenerate input (empty or blank query, `k` of 0, negative or not a number, missing files, malformed JSON, a chunk size above 2,000, a missing corpus folder): each one ends with a clear message and exit code 1 |
+| Quality gates | ✅ `flake8` and `mypy --strict` clean, docstrings on every module, class and function, 1,297 pytest tests |
 
 ---
 
@@ -103,13 +109,23 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 │   ├── evaluator.py     # recall@k, same rules as the moulinette
 │   ├── models.py        # pydantic models
 │   └── exceptions.py    # RagError hierarchy
-├── tests/               # pytest suite, mini corpus and answer battery
+├── tests/               # pytest suite
+│   ├── data/            #   mini corpus and datasets for `make test_rag`
+│   ├── answer_battery/  #   10 questions with expected answers (`make test_answer`)
+│   └── test_corpus/     #   a second corpus for `make test_corpus`, with the layout of data/
+│       ├── raw/fly-in/  #     the Fly-in project (96 files)
+│       └── datasets/    #     dataset_flyin_docs.json (39 questions), dataset_flyin_code.json (53)
+├── data/                # the subject's layout, not in the repository (provided at evaluation)
+│   ├── raw/             #   the corpus: data/raw/vllm-0.10.1/...
+│   ├── processed/       #   the index written by `index`
+│   ├── datasets/        #   UnansweredQuestions/ and AnsweredQuestions/
+│   └── output/          #   search_results/ and search_results_and_answer/, scoped by dataset
 ├── Makefile
 ├── pyproject.toml
 └── uv.lock
 ```
 
-The corpus, the datasets, the index and the outputs are not part of the repository. They live in the folders the subject defines (raw corpus, `processed` index, `UnansweredQuestions` / `AnsweredQuestions` datasets, and outputs scoped by dataset). Every path is a CLI option, and the defaults follow that layout.
+`data/` is not part of the repository (`.gitignore`): the corpus and the datasets are provided at evaluation, and the commands create the index and output folders they write to. Every path is a CLI option, and the defaults follow the subject's layout.
 
 ### Running
 
@@ -150,12 +166,13 @@ uv run -m src <command> --help               # options of a command
 | `make test` | The pytest suite |
 | `make test_rag` | index → search_dataset → evaluate on the mini corpus in `tests/data` (variables `TEST_DATASET`, `TEST_K`, `TEST_CHUNK`) |
 | `make test_rag_base` | The same on the real data, as the moulinette runs it: k = 10, chunks of 2000, docs and code datasets |
+| `make test_corpus` | The same as `test_rag_base` on a second corpus, the Fly-in project in `tests/test_corpus/raw/fly-in`: indexed once, then search_dataset → evaluate for two handwritten datasets, docs (39 questions on the READMEs and map files) and code (53 on `src/`), so each recall is reported apart (variables `CORPUS_K`, `CORPUS_CHUNK`, `CORPUS_DATASETS`; `ANSWER=1` also runs `answer_dataset`) |
 | `make test_limits` | Checks the subject's time limits and prints PASS or FAIL: indexing ≤ 5 min (`test_index`) and 200 questions ≤ 90 s (`test_retrieval`) |
 | `make test_limits_cached` | `test_limits` (indexing removes the query cache, so the searches are uncached), then `test_retrieval` again without indexing, with every question read from the cache |
 | `make test_answer` | Runs `answer` on the 10-question battery in `tests/answer_battery` and prints the expected answer after each one |
 | `make test_answer_dataset` | The same on a whole `AnsweredQuestions` dataset, with a log (variables `ANSWER_DATASET`, `ANSWER_START`, `ANSWER_LIMIT`, `ANSWER_ARGS`) |
-| `FULL=0` | With `test_index`, `test_limits`, `test_rag` or `test_rag_base`: index incrementally instead of with `--full` (the default, `FULL=1`). To show the difference: `make test_index`, `touch` a corpus file, then `make test_index FULL=0` |
-| `make clean` | Removes `__pycache__`, `.mypy_cache`, `.pytest_cache` and the `test_rag` outputs |
+| `FULL=0` | With `test_index`, `test_limits`, `test_rag`, `test_rag_base` or `test_corpus`: index incrementally instead of with `--full` (the default, `FULL=1`). To show the difference: `make test_index`, `touch` a corpus file, then `make test_index FULL=0` |
+| `make clean` | Removes `__pycache__`, `.mypy_cache`, `.pytest_cache` and the outputs of `test_rag` and `test_corpus` |
 | `make cleandata` | Removes the generated index and JSON outputs, and keeps the folder layout |
 
 ---
@@ -170,7 +187,21 @@ uv run -m src <command> --help               # options of a command
 $ uv run python -m src index --max_chunk_size 2000
 Read 1969 of 1969 files (20,147,166 characters) from data/raw
   .md: 178 | .py: 1763 | .txt: 28
-12907 chunks (max 2000 characters)
+12907 chunks (max 2000 characters), 12907 indexed now
+Ingestion complete! Index saved under data/processed/
+```
+
+Run it again and only what changed is processed:
+
+```console
+$ uv run python -m src index
+Index up to date: no file changed in data/raw (12907 chunks in data/processed/)
+
+$ echo "" >> data/raw/vllm-0.10.1/README.md && uv run python -m src index
+Read 1 of 1 files (11,364 characters) from data/raw
+  .md: 1
+Incremental: 0 new, 1 modified, 0 deleted
+12907 chunks (max 2000 characters), 7 indexed now
 Ingestion complete! Index saved under data/processed/
 ```
 
@@ -280,6 +311,14 @@ $ curl -G "http://127.0.0.1:8000/answer" --data-urlencode "query=What is the min
 - **The model is loaded once.** The first `/answer` loads PyTorch and Qwen (tens of seconds). The next ones reuse the model and only pay for the generation. `/health` and `/search` never load it. `--dtype` is chosen when the server starts, because the model is loaded only once.
 - **Errors are HTTP status codes, never a traceback.** Invalid parameters (an empty `query` or one of only spaces, `k` of 0 or not a number) give **422** with the reason. Every `RagError` (no index yet, a broken index, a model that does not fit in memory) gives **503** with the same message as the CLI, for example `{"detail": "No index found in 'data/processed'. Run 'index' first."}`. The server keeps running and the next request tries again, so running `index` in another terminal is enough, without restarting it.
 - **Local by default.** The server listens on `127.0.0.1`, so only this machine can reach it. `--host 0.0.0.0` opens it to the network, without any authentication.
+
+### A second corpus
+
+```console
+$ make test_corpus                    # index Fly-in, then search + evaluate its docs and code datasets
+$ make test_corpus CORPUS_CHUNK=500   # the same with another chunk size
+$ make test_corpus ANSWER=1           # also generate the answers with Qwen
+```
 
 ### With `make`
 
@@ -486,6 +525,36 @@ Times measured with `make test_limits` on a 42 campus computer:
 | `answer`: one question, model load included (float32, ~2,000-token prompt) | ~15–25 s | none |
 | `answer_dataset`: 100 questions, model loaded once | ~17 s per question, ~28 min in total | none |
 
+### A second corpus: Fly-in
+
+Every parameter above was tuned on the vLLM public datasets, so good numbers there could just mean the system is fitted to vLLM. To check it on code it has never seen, `make test_corpus` runs the same pipeline on another project: Fly-in, a drone-routing simulator (`tests/test_corpus/raw/fly-in`: 96 files, 237 K characters; 21 `.py`, 3 `.md`, 72 map `.txt` files).
+
+The questions were written by hand for this test, in two datasets so each recall is reported apart, as with the public ones:
+
+- **docs**: 39 questions on the two READMEs and the map files (their comments and contents).
+- **code**: 53 questions on `src/` (parser, router, scheduler, drones, constants, pygame view...).
+
+Each source range was computed by a script from the exact text where the answer starts and ends, and checked to be unique in its file. The sources are short (median 254 characters for docs, 425 for code, against 878 in the vLLM code dataset).
+
+Default `hybrid` retriever, k = 10:
+
+| Chunk size | Chunks | Dataset | Recall@1 | Recall@3 | **Recall@5** | Recall@10 | Found within k = 10 |
+|---|---|---|---|---|---|---|---|
+| **2000** (default) | 202 | docs | 0.487 | 0.692 | **0.744** | **0.897** | 35 / 39 |
+| | | code | 0.491 | 0.660 | **0.755** | **0.868** | 46 / 53 |
+| 500 | 599 | docs | **0.538** | 0.692 | **0.769** | 0.821 | 32 / 39 |
+| | | code | 0.491 | 0.660 | **0.792** | 0.849 | 45 / 53 |
+| 300 | 957 | docs | 0.487 | 0.692 | **0.795** | 0.795 | 31 / 39 |
+| | | code | 0.491 | 0.642 | **0.736** | 0.830 | 44 / 53 |
+
+Indexing took 2.1 s (2,000), 0.8 s (500) and 1.1 s (300); each `search_dataset` 0.6 s.
+
+- **The system generalises.** Without changing anything, code recall@5 is 0.755 (0.828 on vLLM) and docs 0.744 (0.910 on vLLM). Code is well above the subject's 50 %. Docs stay below the 80 % asked for vLLM, but a correct source is in the top 10 for 35 of the 39 questions.
+- **Lower than on vLLM, for expected reasons.** The parameters (`K1`, `B`, `CANDIDATES`, `ALPHA`, the stopwords) were chosen on vLLM. The questions here were written by someone who knows the code, so they often use different words from the source. And the sources are much shorter, which makes the IoU 0.05 overlap harder to reach with a long chunk.
+- **Chunk size confirms the trade-off seen on vLLM** (see *Chunk size* below). With 500-character chunks, the top results are more precise (recall@5 +2.5 docs, +3.7 code; recall@1 +5.1 docs), because a short answer is a bigger share of a short chunk. But recall@10 drops (−7.6 docs, −1.9 code): there are three times more chunks competing for the same 10 places, and some answers are split between two chunks.
+- **At 300 characters, docs and code part ways.** Docs reach their best recall@5 (0.795), since the map comments and README bullets they ask about fit in a 300-character chunk. But their recall@10 is the worst (0.795, the same as @5): what is not in the top 5 is not found at all, because the 957 chunks crowd it out. Code gets worse at every k above 1 (@5 0.736, below even 2,000): most functions are longer than 300 characters, so the chunk that contains the words of the question is often not the one that contains the answer. Smaller is not better for code.
+- **2,000 stays the default.** It gives the best recall@10 on both datasets here, it is the best on vLLM, which the moulinette scores, and it gives the generator the most context per chunk.
+
 ### Evolution of recall@5
 
 | Change | docs | code |
@@ -681,7 +750,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 
 ### Tests
 
-`make test` runs **1,294 pytest tests** in ~30 s. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
+`make test` runs **1,297 pytest tests** (19 files) in about a minute. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
 
 - **Chunkers:** exact offsets, no gaps or overlaps, never above the maximum, always progressing. These are checked on random texts and on the whole real corpus. Separator priorities, whole code blocks and decorators are tested too.
 - **BM25:** scores compared with a naive reference implementation of the formula, plus tie-breaking, query stopwords and the save/load round trip.
@@ -691,7 +760,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **Incremental indexing:** the change detection (`_diff`) and the plan (`_plan`) on dictionaries and chunks built in memory, with new files that shift the ids, modified files with more or fewer chunks, deletions and everything at once. `BM25Index.update` and `VectorIndex.update` are compared with `build` (also on the real corpus for BM25), and spies check that only the new chunks are tokenized and embedded. `run` on real files: the first run is full, a second one writes nothing, new, modified and deleted files at once give the same index as a full run, only the changed files are read, and a missing or broken manifest, another chunk size, a missing index file or `--full` give a full index. A failed save leaves no manifest.
 - **Evaluator:** the same numbers as the moulinette.
 - **HTTP API:** with FastAPI's `TestClient`, a small BM25 index and a fake model. Covers `/health`, the JSON of `/search` and `/answer`, 422 for every invalid parameter (including a query of only spaces), 503 with the CLI's message for every `RagError` (a missing index, a model that does not fit), an index built while the server runs and used without a restart, no model load without sources or for `/search`, a single load with the server's `dtype` over several answers, 503 when PyTorch fails (and `/search` still answering), parallel searches that never overlap inside the retriever, and the query cache saved after each request. PyTorch is never imported: the tests replace `src.generator` before the endpoint imports it.
-- **CLI:** every command, argument validation, error messages, unknown or private options, exit codes, `--help`, and source paths outside the project.
+- **CLI:** every command, argument validation, error messages, unknown or private options, exit codes, `--help`, and source paths outside the project. The dataset commands run without options: from an empty folder, a missing default file is an argument error that names the option and the path, and `evaluate` with no option reads both default files.
 - **Mini corpus** in `tests/data`, with easy and hard questions, also run end to end by `make test_rag`.
 
 ---
@@ -716,6 +785,8 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **`manifest.json` is removed first and written last.** If `index` stops halfway, no manifest describes indexes that were only partly replaced, and the next run is a full index. A missing, broken or foreign manifest, or a missing index file, means a full index, never an error. A different `--raw_dir` or `--max_chunk_size` also gives a full one, because no saved chunk would be valid.
 - **The lexical method is always available.** `--retriever bm25` runs the mandatory method alone and never loads the vector index.
 - **Stopwords on the query only**, so the list can change without rebuilding the index.
+- **Default paths, never hard-coded ones.** Every input and output path is a CLI option, as the subject requires. The dataset commands default to the public docs dataset and are chained (`search_dataset` writes where `answer_dataset` and `evaluate` read), so the whole pipeline runs without flags. pydantic does not validate defaults unless asked, so `CliCommand` sets `validate_default=True`: a default path arrives as a `Path`, and a missing default file is a clear argument error instead of a crash inside the command.
+- **A second corpus to check generalisation.** Every parameter was tuned on the vLLM public datasets, which could hide overfitting. `make test_corpus` runs the same pipeline, unchanged, on another project with handwritten docs and code datasets whose source ranges were computed by a script from the exact text, never counted by hand.
 - **Paths relative to the project root**, written exactly as in the corpus (`data/raw/vllm-0.10.1/...`), because the grader compares them verbatim.
 - **FastAPI for the HTTP API**, not the standard library's `http.server`. The project already describes every input and output with pydantic models, and FastAPI validates the requests and serialises the responses with those same models, so the API returns exactly the CLI's JSON without building it by hand. Routing, validation (422) and the `/docs` page come with the framework.
 - **The API keeps everything loaded between requests.** The retriever is loaded when the server starts, and the model on the first `/answer`, so later requests skip the cold start that each CLI command pays.
@@ -759,6 +830,9 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **Grounded is not always correct.** In one case the model quoted vLLM's own assertion message, which contradicts the condition next to it (`vllm/v1/core/kv_cache_coordinator.py`).
 - **One answer at a time in the API.** Requests to `/answer` are served one after another, so a second user waits for the first answer. That is enough for a local server, and running them in parallel on a CPU would not be faster.
 - **Incremental indexing trusts the stamps.** A change to the chunker or tokenizer code, or a file edited while keeping the same size and modification time, is not detected: `index --full` rebuilds everything. Loading and saving the indexes still grow with the corpus, so even one changed file costs about a second.
+- **Lower recall on unseen code.** On the Fly-in corpus, recall@5 is 74–76 % against 83–91 % on vLLM: the parameters were tuned on vLLM, and the docs dataset stays below the 80 % the subject asks for vLLM.
+- **The query cache never forgets.** Entries are only dropped when the index or the configuration changes, so the cache file grows with the number of distinct questions.
+- **No authentication in the API.** It listens on `127.0.0.1` by default; `--host 0.0.0.0` exposes it to the network as it is.
 - **Memory check in containers.** The check reads the memory of the whole machine (`/proc/meminfo`). Inside a container or cgroup with its own limit, it can overestimate what is available.
 
 ---
@@ -789,6 +863,9 @@ I used an AI assistant throughout the project, as a tutor, a reviewer and a pair
   - the CLI hardening (`CliCommand.validated`);
   - the decorator handling of `PyChunker`;
   - the coordination of the incremental index (`IncrementalIndexer.run` and `_save`) and the new `index` output;
+  - the HTTP API fixes after my first version of `/answer`: the two locks, the `RagError` → 503 handler, the model kept between requests and the validation of blank queries;
+  - the default dataset paths and the `validate_default` setting;
+  - the Fly-in datasets, generated by a script from exact text anchors, and the `test_corpus` rule;
   - the query stopword list;
   - most of the test suite;
   - several Makefile rules.
