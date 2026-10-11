@@ -12,6 +12,7 @@ from typing import get_args
 
 from pydantic import ValidationError
 
+from .answer_cache import AnswerCache
 from .bm25_index import BM25Index
 from .cached_retriever import CachedRetriever
 from .chunker import MdChunker, PyChunker
@@ -130,8 +131,8 @@ class IncrementalIndexer:
 
     def _save(self, bm25: BM25Index, vectors: VectorIndex,
               stamps: dict[str, FileStamp]) -> None:
-        """Write both indexes, remove the query caches, and write the
-        manifest last.
+        """Write both indexes, remove the query and answer caches, and
+        write the manifest last.
 
         Args:
             bm25: The BM25 index to save.
@@ -146,8 +147,12 @@ class IncrementalIndexer:
         vectors.save(self._index_dir)
         # Results cached with the old index are never reused (the namespace
         # changes), so remove the files instead of leaving them on disk.
-        for name in get_args(RetrieverMode):
-            cache_path = CachedRetriever.file_path(self._index_dir, name)
+        # The answers too: they are only valid for the chunks they were
+        # generated from.
+        cache_paths = [CachedRetriever.file_path(self._index_dir, name)
+                       for name in get_args(RetrieverMode)]
+        cache_paths.append(AnswerCache.file_path(self._index_dir))
+        for cache_path in cache_paths:
             try:
                 cache_path.unlink(missing_ok=True)
             except OSError as e:

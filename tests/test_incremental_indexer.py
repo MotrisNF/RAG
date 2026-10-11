@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
+from src.answer_cache import AnswerCache
 from src.bm25_index import BM25Index
 from src.cached_retriever import CachedRetriever
 from src.exceptions import PathError
@@ -558,6 +559,21 @@ class TestRun:
         report = corpus.run()
         assert report.full
         assert (corpus.index_dir / name).is_file()
+
+    def test_answer_cache_removed(self, corpus: Corpus) -> None:
+        """The answer cache follows the same rule: kept while the index
+        is up to date, removed when it changes or with ``full``."""
+        corpus.run()
+        answers = AnswerCache.file_path(corpus.index_dir)
+        answers.write_text("{}", encoding="utf-8")
+        corpus.run()
+        assert answers.is_file()
+        corpus.write("a.md", "# Title\nChanged.\n")
+        corpus.run()
+        assert not answers.exists()
+        answers.write_text("{}", encoding="utf-8")
+        corpus.run(full=True)
+        assert not answers.exists()
 
     def test_query_caches_removed(self, corpus: Corpus) -> None:
         """A changed index removes the query caches; an index up to date

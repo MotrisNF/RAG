@@ -55,8 +55,8 @@ All five bonuses are implemented. The system was also measured on a second, inde
 | Bonus 1: semantic embeddings | ✅ Vector index built with `potion-base-8M` next to the BM25 index |
 | Bonus 2: hybrid retrieval | ✅ BM25 candidates re-ranked with the vector scores (default; `--retriever bm25` gives the lexical search alone) |
 | Bonus 3: incremental indexing | ✅ `index` compares each file's size and modification time with `manifest.json` and only reads, tokenizes and embeds the new and modified files; the chunks of modified and deleted files leave both indexes. The result is identical to a full index. `--full` forces a full one |
-| Bonus 4: caching | ✅ Cold start: the embedding model is saved with the index and run with numpy, so searching never imports PyTorch. Repeated queries: results are cached on disk, so a repeated search loads no index at all (`--cache=False` to turn it off) |
-| Bonus 5: local HTTP API | ✅ `serve` starts a FastAPI server on `127.0.0.1` with `/health`, `/search` and `/answer`, which return the same JSON as the CLI. The model is loaded on the first `/answer` and kept for the next ones |
+| Bonus 4: caching | ✅ Cold start: the embedding model is saved with the index and run with numpy, so searching never imports PyTorch. Repeated queries: results are cached on disk, so a repeated search loads no index at all. Repeated answers: an answer already generated for the same question and sources is read from disk without importing PyTorch, in `answer`, `answer_dataset` and the API (`--cache=False` turns both caches off) |
+| Bonus 5: local HTTP API | ✅ `serve` starts a FastAPI server on `127.0.0.1` with `/health`, `/search` and `/answer`, which return the same JSON as the CLI, plus `POST /index` to re-index without restarting. Each request can choose `bm25` or `hybrid`. The model is loaded on the first `/answer` that is not cached and kept for the next ones |
 | Robustness | ✅ No traceback on degenerate input (empty or blank query, `k` of 0, negative or not a number, missing files, malformed JSON, a chunk size above 2,000, a missing corpus folder): each one ends with a clear message and exit code 1 |
 | Quality gates | ✅ `flake8` and `mypy --strict` clean, docstrings on every module, class and function, 1,297 pytest tests |
 
@@ -97,7 +97,8 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 ├── src/                 # the Python package, run with: uv run python -m src <command>
 │   ├── __main__.py      # entry point: Fire, error handling and exit codes
 │   ├── commands.py      # RagCLI: the six commands and serve
-│   ├── api.py           # RagApi: the local HTTP API (bonus 5)
+│   ├── api.py           # RagApi, RetrieverLoader: the local HTTP API (bonus 5)
+│   ├── answer_cache.py  # AnswerCache: answers saved between commands
 │   ├── argv_guard.py    # command-line checks before Fire runs
 │   ├── reader.py        # CorpusReader
 │   ├── incremental_indexer.py  # IncrementalIndexer: what index re-indexes (bonus 3)
@@ -138,20 +139,20 @@ uv run -m src <command> --help               # options of a command
 
 | Command | Options (default) | Output |
 |---|---|---|
-| `index` | `--max_chunk_size` (2000, at most 2000) · `--raw_dir` (`data/raw`) · `--index_dir` (`data/processed`) · `--full` (`False`) | The BM25 index (`index.json`), the vector index (`vectors.npy`, `owners.npy`), the embedding model (`embeddings.npy`, `tokenizer.json`) and the corpus stamps (`manifest.json`). Only the files changed since the last run are re-indexed; with no change, nothing is written. Removes the query caches when the index changes |
+| `index` | `--max_chunk_size` (2000, at most 2000) · `--raw_dir` (`data/raw`) · `--index_dir` (`data/processed`) · `--full` (`False`) | The BM25 index (`index.json`), the vector index (`vectors.npy`, `owners.npy`), the embedding model (`embeddings.npy`, `tokenizer.json`) and the corpus stamps (`manifest.json`). Only the files changed since the last run are re-indexed; with no change, nothing is written. Removes the query and answer caches when the index changes |
 | `search <query>` | `--k` (10) · `--index_dir` · `--retriever` (`hybrid` \| `bm25`) · `--cache` (`True`) · `--save_directory` (`data/output/search_results/SingleQuestions`) | `StudentSearchResults` JSON on stdout and in `<question_id>.json` |
 | `search_dataset` | `--dataset_path` (`data/datasets/UnansweredQuestions/dataset_docs_public.json`) · `--k` (10) · `--save_directory` (`data/output/search_results/UnansweredQuestions`) · `--index_dir` · `--retriever` · `--cache` | `StudentSearchResults` JSON, with the same file name as the dataset |
 | `answer <query>` | `--k` (10) · `--index_dir` · `--retriever` · `--dtype` (`auto` \| `float32` \| `bfloat16`) · `--cache` · `--save_directory` (`data/output/search_results_and_answer/SingleQuestions`) | `StudentSearchResultsAndAnswer` JSON on stdout and in `<question_id>.json` |
-| `answer_dataset` | `--student_search_results_path` (`data/output/search_results/UnansweredQuestions/dataset_docs_public.json`, what `search_dataset` writes by default) · `--save_directory` (`data/output/search_results_and_answer/UnansweredQuestions`) · `--dtype` | `StudentSearchResultsAndAnswer` JSON, with the same file name as the input |
+| `answer_dataset` | `--student_search_results_path` (`data/output/search_results/UnansweredQuestions/dataset_docs_public.json`, what `search_dataset` writes by default) · `--save_directory` (`data/output/search_results_and_answer/UnansweredQuestions`) · `--dtype` · `--index_dir` (`data/processed`, only for the answer cache) · `--cache` | `StudentSearchResultsAndAnswer` JSON, with the same file name as the input. The model is only loaded if a question with sources is not cached |
 | `evaluate` | `--student_search_results_path` (the same default as `answer_dataset`) · `--dataset_path` (`data/datasets/AnsweredQuestions/dataset_docs_public.json`) · `--k` (10) · `--show_failed` | recall@1/3/5/10 report |
-| `serve` | `--host` (`127.0.0.1`) · `--port` (8000) · `--index_dir` · `--retriever` · `--dtype` · `--cache` | A local HTTP API until Ctrl+C (see [HTTP API](#http-api-bonus-5)). Nothing is saved to `data/output` |
+| `serve` | `--host` (`127.0.0.1`) · `--port` (8000) · `--index_dir` · `--retriever` (the default of each request) · `--dtype` · `--cache` · `--raw_dir` (`data/raw`, for `POST /index`) | A local HTTP API until Ctrl+C (see [HTTP API](#http-api-bonus-5)). Nothing is saved to `data/output` |
 
 - `search` and `answer` print their JSON on stdout and also save it as `<save_directory>/<question_id>.json`. Progress bars and status messages, including where the file was saved, go to stderr, so you can still redirect or pipe the JSON (`> out.json`, `| jq`).
 - Put boolean flags such as `--show_failed` after the paths, or write them as `--show_failed=True`. Otherwise Fire reads the next word as the flag's value.
 - **The dataset commands run without options.** Their input files default to the public docs dataset, chained: `search_dataset` writes its results where `answer_dataset` and `evaluate` look for them, so `search_dataset`, then `evaluate` (or `answer_dataset`), works with no flags. A default file that does not exist is reported as an argument error with its path. Pass the options to use the code dataset or another file.
 - `--dtype` and `--retriever` only accept the listed values. Any other value is rejected with a clear argument error.
 - `index` is incremental: run it again after editing the corpus and only the new and modified files are processed. A different `--raw_dir` or `--max_chunk_size`, a missing or broken `manifest.json` or index file, or `--full` give a full index.
-- `--cache` is on by default: searches already made with the same index and retriever are read from `<index_dir>/query_cache_<retriever>.json`. Turn it off with `--cache=False`.
+- `--cache` is on by default: searches already made with the same index and retriever are read from `<index_dir>/query_cache_<retriever>.json`, and answers already generated for the same question and sources from `<index_dir>/answer_cache.json`. A cached answer never imports PyTorch. Turn both off with `--cache=False`.
 
 ### Makefile
 
@@ -170,7 +171,7 @@ uv run -m src <command> --help               # options of a command
 | `make test_limits` | Checks the subject's time limits and prints PASS or FAIL: indexing ≤ 5 min (`test_index`) and 200 questions ≤ 90 s (`test_retrieval`) |
 | `make test_limits_cached` | `test_limits` (indexing removes the query cache, so the searches are uncached), then `test_retrieval` again without indexing, with every question read from the cache |
 | `make test_answer` | Runs `answer` on the 10-question battery in `tests/answer_battery` and prints the expected answer after each one |
-| `make test_answer_dataset` | The same on a whole `AnsweredQuestions` dataset, with a log (variables `ANSWER_DATASET`, `ANSWER_START`, `ANSWER_LIMIT`, `ANSWER_ARGS`) |
+| `make test_answer_dataset` | The same on a whole `AnsweredQuestions` dataset, loading the model once: `search_dataset`, then `answer_dataset`, then each question with its answer and its reference answer, with a log. Cached answers are not generated again (variables `ANSWER_DATASET`, `ANSWER_START`, `ANSWER_LIMIT`, `ANSWER_SEARCH_ARGS`, `ANSWER_ARGS`) |
 | `FULL=0` | With `test_index`, `test_limits`, `test_rag`, `test_rag_base` or `test_corpus`: index incrementally instead of with `--full` (the default, `FULL=1`). To show the difference: `make test_index`, `touch` a corpus file, then `make test_index FULL=0` |
 | `make clean` | Removes `__pycache__`, `.mypy_cache`, `.pytest_cache` and the outputs of `test_rag` and `test_corpus` |
 | `make cleandata` | Removes the generated index and JSON outputs, and keeps the folder layout |
@@ -299,16 +300,23 @@ $ curl "http://127.0.0.1:8000/health"
 {"status":"ok"}
 $ curl -G "http://127.0.0.1:8000/search" --data-urlencode "query=How do I load a LoRA adapter?" -d k=5
 $ curl -G "http://127.0.0.1:8000/answer" --data-urlencode "query=What is the minimum version of bitsandbytes required for vLLM quantization?"
+$ curl -G "http://127.0.0.1:8000/search" --data-urlencode "query=How do I load a LoRA adapter?" -d retriever=bm25
+$ curl -X POST "http://127.0.0.1:8000/index"
+{"up_to_date":true,"full":false,"new":[],"modified":[],"deleted":[],"skipped":[],"chunk_count":12907,"fresh_count":0}
 ```
 
 | Endpoint | Parameters | Response |
 |---|---|---|
 | `GET /health` | none | `{"status": "ok"}` |
-| `GET /search` | `query` (required, not only spaces) · `k` (10, > 0) | `StudentSearchResults`, as the `search` command |
-| `GET /answer` | `query` (required, not only spaces) · `k` (10, > 0) | `StudentSearchResultsAndAnswer`, as the `answer` command |
+| `GET /search` | `query` (required, not only spaces) · `k` (10, > 0) · `retriever` (`bm25` \| `hybrid`, default: `serve --retriever`) | `StudentSearchResults`, as the `search` command |
+| `GET /answer` | `query` (required, not only spaces) · `k` (10, > 0) · `retriever` | `StudentSearchResultsAndAnswer`, as the `answer` command |
+| `POST /index` | `full` (`false`) · `max_chunk_size` (2000, 1–2000) | `IndexSummary`: whether it was up to date or full, the new, modified, deleted and skipped files, and the chunk counts |
 
 - **Same JSON as the CLI.** The endpoints return the same pydantic models, so the output can be fed to `evaluate` like the files the commands save. The API itself saves nothing.
-- **The model is loaded once.** The first `/answer` loads PyTorch and Qwen (tens of seconds). The next ones reuse the model and only pay for the generation. `/health` and `/search` never load it. `--dtype` is chosen when the server starts, because the model is loaded only once.
+- **The model is loaded once.** The first `/answer` that is not cached loads PyTorch and Qwen (tens of seconds). The next ones reuse the model and only pay for the generation. `/health` and `/search` never load it. `--dtype` is chosen when the server starts, because the model is loaded only once.
+- **Answers are cached**, in the same `answer_cache.json` as the CLI: a question already answered with the same sources, by the API or by `answer` / `answer_dataset`, is returned at once, without the model. Several identical requests at the same time generate the answer once.
+- **Re-index without restarting.** `POST /index` does what the `index` command does (only the changed files, or everything with `full=true`). If the index changed, the server loads it again and starts an empty answer cache. Searches wait while it runs. It is a `POST` because it changes the index on disk; a `GET` gives 405.
+- **Each request chooses its retriever.** `retriever=bm25` or `hybrid`; without it, the one given to `serve`. The other one is loaded the first time it is asked for, and both share a single BM25 index in memory.
 - **Errors are HTTP status codes, never a traceback.** Invalid parameters (an empty `query` or one of only spaces, `k` of 0 or not a number) give **422** with the reason. Every `RagError` (no index yet, a broken index, a model that does not fit in memory) gives **503** with the same message as the CLI, for example `{"detail": "No index found in 'data/processed'. Run 'index' first."}`. The server keeps running and the next request tries again, so running `index` in another terminal is enough, without restarting it.
 - **Local by default.** The server listens on `127.0.0.1`, so only this machine can reach it. `--host 0.0.0.0` opens it to the network, without any authentication.
 
@@ -701,6 +709,43 @@ Removing the Python loop that averages the token vectors was measured and discar
 
 What is left in a cached run is starting Python and reading the cache file (~3.7 MB for the 100 docs questions). `make test_limits` still measures the cold case, because `index` removes the caches first. `make test_limits_cached` shows both cases one after the other.
 
+**Repeated answers.** The search is milliseconds; the cost of an answer is loading PyTorch and Qwen (~6 s) and generating (~15 s). Generation is deterministic (greedy decoding), so a cached answer is exactly the one that would be generated. The cache saves the answer by a key made of the question and the path, range **and text** of each context chunk, in order, and checking it never imports PyTorch. Measured with `make test_answer`, the 10-question battery, which runs `answer` once per question (a new process each time), on a campus computer:
+
+| `make test_answer` (10 questions) | No cache | Cached |
+|---|---|---|
+| One question | 14.2–22.2 s (~17 s): load PyTorch and Qwen, then generate | **0.3 s**: search, read the answer, no PyTorch |
+| Whole battery | 172 s | **3 s** |
+| Answers | | identical |
+
+`make test_answer_dataset` runs `search_dataset` and then `answer_dataset`, so the model is loaded once for the whole dataset. On the 100 docs questions:
+
+| `make test_answer_dataset` (100 docs questions) | No cache | Cached |
+|---|---|---|
+| `search_dataset` | 2.1 s | 0.3 s (query cache) |
+| `answer_dataset` | 1,498 s (~25 min): Qwen loaded once, **~15 s per answer** | **0.3 s**: `100 of 100 answers read from the cache`, no PyTorch |
+| Whole rule | ~25 min | **1 s** |
+
+Before, the rule ran `answer` once per question, which loaded PyTorch and Qwen again for every question: ~20 s per question, ~35 min for the dataset.
+
+Answers already generated by another command are reused too: `make test_answer_dataset` stopped after 8 questions and run again returned those 8 at once from the cache, and only loaded Qwen for the 9th. `answer_dataset` saves the cache every 10 generated answers and when it stops, also on Ctrl+C or an error, so an interrupted run keeps every answer it generated (a killed process, `kill -9`, keeps those up to the last save). A run stopped with Ctrl+C after 2 answers, then started again:
+
+```console
+$ make test_answer_dataset
+...
+0 of 100 answers read from the cache
+Loading PyTorch...
+Loading Qwen/Qwen3-0.6B...
+Generating answers:   2%|▏         | 2/100 [00:24<19:52, 12.17s/question]^C
+$ make test_answer_dataset
+...
+2 of 100 answers read from the cache
+Loading PyTorch...
+Loading Qwen/Qwen3-0.6B...
+Generating answers:   0%|          | 0/98 [00:00<?, ?question/s]
+```
+
+The second run loads the model once and only generates the 98 answers that are missing.
+
 ### Incremental indexing (bonus 3)
 
 Before the change, `index` spent ~8.1 s on campus. Reading and chunking took 5 % of it; tokenizing for BM25 took 30 % and the embeddings 50 %. So both indexes are updated, not only the vectors: rebuilding BM25 from every chunk would still tokenize the whole corpus.
@@ -750,7 +795,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 
 ### Tests
 
-`make test` runs **1,297 pytest tests** (19 files) in about a minute. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
+`make test` runs **1,372 pytest tests** (19 files) in about a minute. It never loads Qwen or the embedding model, and never writes into the project's `data/output`: `tests/conftest.py` replaces the embedding model with a fake bag-of-words encoder in every test, and sends the default output folders to a temporary one.
 
 - **Chunkers:** exact offsets, no gaps or overlaps, never above the maximum, always progressing. These are checked on random texts and on the whole real corpus. Separator priorities, whole code blocks and decorators are tested too.
 - **BM25:** scores compared with a naive reference implementation of the formula, plus tie-breaking, query stopwords and the save/load round trip.
@@ -759,7 +804,8 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **`StaticEncoder`:** a tiny real model built inside the test (5-word tokenizer, table of known vectors). Covers the mean and normalisation computed by hand, unknown words, empty texts (zeros, never NaN), and loading from the cache, with a download, or with neither.
 - **Incremental indexing:** the change detection (`_diff`) and the plan (`_plan`) on dictionaries and chunks built in memory, with new files that shift the ids, modified files with more or fewer chunks, deletions and everything at once. `BM25Index.update` and `VectorIndex.update` are compared with `build` (also on the real corpus for BM25), and spies check that only the new chunks are tokenized and embedded. `run` on real files: the first run is full, a second one writes nothing, new, modified and deleted files at once give the same index as a full run, only the changed files are read, and a missing or broken manifest, another chunk size, a missing index file or `--full` give a full index. A failed save leaves no manifest.
 - **Evaluator:** the same numbers as the moulinette.
-- **HTTP API:** with FastAPI's `TestClient`, a small BM25 index and a fake model. Covers `/health`, the JSON of `/search` and `/answer`, 422 for every invalid parameter (including a query of only spaces), 503 with the CLI's message for every `RagError` (a missing index, a model that does not fit), an index built while the server runs and used without a restart, no model load without sources or for `/search`, a single load with the server's `dtype` over several answers, 503 when PyTorch fails (and `/search` still answering), parallel searches that never overlap inside the retriever, and the query cache saved after each request. PyTorch is never imported: the tests replace `src.generator` before the endpoint imports it.
+- **HTTP API:** with FastAPI's `TestClient`, a small BM25 index and a fake model. Covers `/health`, the JSON of `/search` and `/answer`, 422 for every invalid parameter (including a query of only spaces), 503 with the CLI's message for every `RagError` (a missing index, a model that does not fit), an index built while the server runs and used without a restart, no model load without sources or for `/search`, a single load with the server's `dtype` over several answers, 503 when PyTorch fails (and `/search` still answering), parallel searches that never overlap inside the retriever, and the query cache saved after each request. With the answer cache: a repeated question generated once, reused by a server started later, no model load on a hit (even without PyTorch), and four identical requests at once generating once while `/search` keeps answering. `POST /index`: up to date, a changed file found by the next search without a restart, `full`, the answer cache reset, 405 for `GET`, 422 and 503. `?retriever=`: the other retriever loaded on demand, one shared BM25 index, the same results as the CLI. PyTorch is never imported: the tests replace `src.generator` before the endpoint imports it.
+- **`AnswerCache`:** the key changes with the question, the order, text and range of the chunks; the namespace changes with `generator.py`; round trip, broken, foreign or non-UTF-8 files as an empty cache, no rewrite without changes, an unwritable folder, a failed move that keeps the old file, and, in a fresh interpreter, that using it never imports `src.generator` or `torch`. Through the CLI with a fake generator: `answer` twice loads the model once, `--cache=False`, a changed `generator.py`, no sources, the answer kept when writing the output fails; `answer_dataset` with everything cached loads nothing, half cached generates only the missing questions in order, an edited source file regenerates the questions that used it, the cache is saved every few answers, and a run stopped with Ctrl+C keeps what it generated.
 - **CLI:** every command, argument validation, error messages, unknown or private options, exit codes, `--help`, and source paths outside the project. The dataset commands run without options: from an empty folder, a missing default file is an argument error that names the option and the path, and `evaluate` with no option reads both default files.
 - **Mini corpus** in `tests/data`, with easy and hard questions, also run end to end by `make test_rag`.
 
@@ -778,6 +824,10 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **The query cache is a decorator, not a change to the retrievers.** `CachedRetriever` is a `Retriever` that wraps any other one. It receives a function that builds the wrapped retriever instead of the retriever itself, so nothing is loaded until a question is not cached.
 - **A cached result is only reused for the same index and configuration.** Each cache file carries a namespace: the retriever, its parameters (`K1`, `B`, `CANDIDATES`, `ALPHA`, the model) and the size and modification time of the index files. Rebuilding the index or changing a parameter gives a new namespace, and the old results are ignored. Only file metadata is read, so it is instant.
 - **The cache never breaks a command.** A missing, broken or foreign cache file means an empty cache, and a cache that cannot be written only prints a warning. It is written to a temporary file and moved over the old one (`os.replace`), so an interrupted write never leaves a half-written file. JSON validated with pydantic, not pickle, as for the index.
+- **The answer cache key is everything that goes into the prompt.** The question and the path, range and text of each context chunk, in order, hashed with sha256 (the text would make a key of ~20 KB). With the text in the key, an edited file can never return a stale answer, even with an old index. `index` also removes the answer cache whenever the index changes.
+- **`index --full` is a reset of everything, caches included.** It removes the query and answer caches on purpose: it means starting from scratch, so everything in the index folder comes from that run. The caches never need it to stay correct: the query cache namespace holds the size and modification time of the index files, which a rewrite changes, and the answer cache key holds the text of the chunks. To keep the answers already generated, run `index` without `--full` (or `FULL=0` in the Makefile): if nothing changed, it writes nothing and keeps both caches.
+- **The answer cache namespace is the text of `generator.py`.** The model, the prompt, the token budget and the decoding all live there, so changing any of them makes the old answers stale on their own. The file is read as text and hashed, never imported, so a cached answer never loads PyTorch. Its text, not its modification time: a `git checkout` that does not change it keeps the cache.
+- **`dtype` is not in the answer cache key.** `--dtype auto`, the default, picks float32 or bfloat16 from the available memory, and both give practically the same answer. Keeping them apart would only split the cache.
 - **Exact-match cache, not a semantic one.** Reusing the results of a *similar* question (embedding similarity above a threshold) was considered and discarded. With `potion-base-8M`, *"What is the minimum version of bitsandbytes?"* and *"… maximum version …"* have a similarity of 0.904, the same as a real paraphrase (*"How do I load a LoRA adapter?"* / *"… in vLLM?"*), and *load* / *unload* (0.847) share only 1 of their 5 BM25 results. Because the model averages word vectors, changing one word barely moves the vector, so no threshold separates paraphrases from opposite questions. A semantic cache would also make the output depend on earlier questions, and it would have to load the model on every command to save a ~7 ms search.
 - **Incremental indexing on both indexes, with one shared plan.** A chunk id is the chunk's position, and BM25's postings and lengths and the vector owners all store it. Removing a chunk shifts every later id, which would give wrong results with no error. `IncrementalIndexer._plan` computes the map `{old id: new id}` once and gives the same one to `BM25Index.update` and `VectorIndex.update`, so the two indexes cannot drift apart.
 - **The incremental index equals the full one.** Chunks are always sorted by file and position (`Chunk.order_key`), in the full index too, and a chunk is tokenized (`_chunk_tokens`) and embedded (`_embed`) by the same method in `build` and `update`. So the best test is simple: an updated index must be identical to a full index of the same corpus.
@@ -790,7 +840,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **Paths relative to the project root**, written exactly as in the corpus (`data/raw/vllm-0.10.1/...`), because the grader compares them verbatim.
 - **FastAPI for the HTTP API**, not the standard library's `http.server`. The project already describes every input and output with pydantic models, and FastAPI validates the requests and serialises the responses with those same models, so the API returns exactly the CLI's JSON without building it by hand. Routing, validation (422) and the `/docs` page come with the framework.
 - **The API keeps everything loaded between requests.** The retriever is loaded when the server starts, and the model on the first `/answer`, so later requests skip the cold start that each CLI command pays.
-- **Two locks (mutexes) in the API.** FastAPI runs each request in its own thread, so two requests can arrive at once. One lock lets a single search (with its cache write) run at a time, because two writers would corrupt the query cache. The other loads the model once and generates one answer at a time, because two generations at once would double the memory. They are never held together, so a `/search` does not wait for an answer being generated, and they cannot deadlock.
+- **Two locks (mutexes) in the API.** FastAPI runs each request in its own thread, so two requests can arrive at once. One lock lets a single search (with its cache write) run at a time, because two writers would corrupt the query cache. The other loads the model once and generates one answer at a time, because two generations at once would double the memory. They are never held together, so a `/search` does not wait for an answer being generated, and they cannot deadlock. A third lock guards the answer cache; it is only taken alone or inside one of the other two, never the other way round. A request that waited for the model checks the answer cache again before generating, so identical requests at the same time generate once.
 - **Lazy import and single load of Qwen.** Only `answer` and `answer_dataset` pay for PyTorch, and only once per command.
 - **float32 on CPU when it fits.** It reads the prompt ~3× faster than bfloat16. The type is chosen before loading, so a smaller machine gets a slower answer instead of a killed process.
 - **A prompt for a small model.** Few positive instructions, examples instead of rules, the question after the context, a fixed refusal sentence that is easy to detect, and greedy decoding so answers are reproducible.
@@ -833,6 +883,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **Lower recall on unseen code.** On the Fly-in corpus, recall@5 is 74–76 % against 83–91 % on vLLM: the parameters were tuned on vLLM, and the docs dataset stays below the 80 % the subject asks for vLLM.
 - **The query cache never forgets.** Entries are only dropped when the index or the configuration changes, so the cache file grows with the number of distinct questions.
 - **No authentication in the API.** It listens on `127.0.0.1` by default; `--host 0.0.0.0` exposes it to the network as it is.
+- **A forced `--dtype` can reuse an answer of the other type.** The answer cache ignores `dtype` (see the design decisions). With `--dtype auto` this never matters; forcing another type and wanting a fresh answer needs `--cache=False`.
 - **Memory check in containers.** The check reads the memory of the whole machine (`/proc/meminfo`). Inside a container or cgroup with its own limit, it can overestimate what is available.
 
 ---

@@ -154,7 +154,8 @@ test_corpus:
 		if [ "$(ANSWER)" = 1 ]; then \
 			time uv run -m src answer_dataset \
 				--student_search_results_path $(CORPUS_OUTPUT)/$$dataset \
-				--save_directory $(CORPUS_ANSWERS) || exit 1; \
+				--save_directory $(CORPUS_ANSWERS) \
+				--index_dir $(CORPUS_INDEX) || exit 1; \
 		fi; \
 	done
 
@@ -230,42 +231,61 @@ test_answer:
 	done; \
 	echo "Battery total: $$((SECONDS - start)) s"
 
-# Same as test_answer, but on a whole AnsweredQuestions dataset: runs
-# `answer` on every question and prints its reference answer after it.
-# ~20 s per question (~35 min for 100). Options:
+# Same as test_answer, but on a whole AnsweredQuestions dataset, loading
+# the model only once: search_dataset, then answer_dataset (as the
+# evaluation runs them), then each question with its answer and its
+# reference answer. Answers already in the answer cache (from answer,
+# answer_dataset or the API, same question and sources) are not
+# generated again, and the model is not loaded if all are cached.
+# ~15 s per new question. Options:
 #   ANSWER_DATASET=.../dataset_code_public.json   (default: docs)
 #   ANSWER_START=77       first question to run, 1-based (default 1)
 #   ANSWER_LIMIT=10       only N questions from there (0 = all)
-#   ANSWER_ARGS="..."     extra options for `answer`, as in test_answer
+#   ANSWER_SEARCH_ARGS="--k 5 --retriever bm25"   options for search_dataset
+#   ANSWER_ARGS="--dtype bfloat16 --cache=False"  options for answer_dataset
 #   ANSWER_LOG=path.log   where the output is also saved (default below,
 #                         one file per dataset, overwritten on each run)
-ANSWER_DATASET ?= $(BASE_DATA)/datasets/AnsweredQuestions/dataset_docs_public.json
-ANSWER_START   ?= 1
-ANSWER_LIMIT   ?= 0
-ANSWER_LOG     ?= $(BASE_DATA)/output/answer_logs/$(basename $(notdir $(ANSWER_DATASET))).log
+# The questions, search results and answers of the run are kept in
+# ANSWER_WORK.
+ANSWER_DATASET     ?= $(BASE_DATA)/datasets/AnsweredQuestions/dataset_docs_public.json
+ANSWER_START       ?= 1
+ANSWER_LIMIT       ?= 0
+ANSWER_SEARCH_ARGS ?=
+ANSWER_NAME        := $(basename $(notdir $(ANSWER_DATASET)))
+ANSWER_LOG         ?= $(BASE_DATA)/output/answer_logs/$(ANSWER_NAME).log
+ANSWER_WORK        ?= $(BASE_DATA)/output/answer_logs/$(ANSWER_NAME)
 
 test_answer_dataset:
-	@mkdir -p $(dir $(ANSWER_LOG)); set -o pipefail; ( \
-	mapfile -t lines < <(uv run python -c 'import json, sys; \
+	@mkdir -p $(ANSWER_WORK) $(dir $(ANSWER_LOG)); set -o pipefail; ( \
+	start=$$SECONDS; \
+	uv run python -c 'import json, sys; \
 		qs = json.load(open(sys.argv[1]))["rag_questions"]; \
 		first = int(sys.argv[3]) - 1; n = int(sys.argv[2]); \
 		qs = qs[first:first + n] if n else qs[first:]; \
-		[print(q["question"].replace("\n", " ") + "\x1f" \
-		+ q.get("answer", "").replace("\n", " ")) for q in qs]' \
-		$(ANSWER_DATASET) $(ANSWER_LIMIT) $(ANSWER_START)) || exit 1; \
-	total=$${#lines[@]}; n=$$(( $(ANSWER_START) - 1 )); start=$$SECONDS; \
-	last=$$(( n + total )); \
-	for line in "$${lines[@]}"; do \
-		n=$$((n + 1)); \
-		question=$${line%%$$'\x1f'*}; \
-		expected=$${line#*$$'\x1f'}; \
-		echo "===== [$$n/$$last]"; \
-		echo "Question: $$question"; \
-		time uv run -m src answer "$$question" $(ANSWER_ARGS) < /dev/null; \
-		echo "Expected: $$expected"; \
-		echo; \
-	done; \
-	echo "Dataset total: $$total questions in $$((SECONDS - start)) s" \
+		json.dump({"rag_questions": qs}, open(sys.argv[4], "w")); \
+		print(f"{len(qs)} questions from {sys.argv[1]}")' \
+		$(ANSWER_DATASET) $(ANSWER_LIMIT) $(ANSWER_START) \
+		$(ANSWER_WORK)/questions.json || exit 1; \
+	time uv run -m src search_dataset \
+		--dataset_path $(ANSWER_WORK)/questions.json \
+		--save_directory $(ANSWER_WORK)/search $(ANSWER_SEARCH_ARGS) \
+		< /dev/null || exit 1; \
+	time uv run -m src answer_dataset \
+		--student_search_results_path $(ANSWER_WORK)/search/questions.json \
+		--save_directory $(ANSWER_WORK)/answers $(ANSWER_ARGS) \
+		< /dev/null || exit 1; \
+	uv run python -c 'import json, sys; \
+		expected = {q["question_id"]: q.get("answer", "") for q in \
+			json.load(open(sys.argv[1]))["rag_questions"]}; \
+		results = json.load(open(sys.argv[2]))["search_results"]; \
+		first = int(sys.argv[3]); last = first + len(results) - 1; \
+		[print("===== [%d/%d]\nQuestion: %s\nAnswer: %s\nExpected: %s\n" \
+			% (n, last, r["question"], r["answer"], \
+			expected.get(r["question_id"], ""))) \
+		for n, r in enumerate(results, start=first)]' \
+		$(ANSWER_WORK)/questions.json \
+		$(ANSWER_WORK)/answers/questions.json $(ANSWER_START) || exit 1; \
+	echo "Dataset total: $$((SECONDS - start)) s" \
 	) 2>&1 | tee $(ANSWER_LOG); \
 	echo "Saved to $(ANSWER_LOG)"
 

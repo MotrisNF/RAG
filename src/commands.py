@@ -9,14 +9,15 @@ import sys
 from types import SimpleNamespace
 from collections import Counter
 from pathlib import Path, PurePosixPath
-from typing import (Annotated, Any, Callable, Literal, TypeVar, cast,
-                    get_args, get_origin)
+from typing import (TYPE_CHECKING, Annotated, Any, Callable, Literal,
+                    TypeVar, cast, get_args, get_origin)
 import uuid
 
 from pydantic import (BaseModel, ConfigDict, Field, FilePath, ValidationError,
                       validate_call)
 from tqdm import tqdm
 
+from .answer_cache import AnswerCache
 from .base_retriever import Retriever
 from .bm25_index import BM25Index
 from .cached_retriever import CachedRetriever
@@ -31,6 +32,10 @@ from .reader import CorpusReader
 from .vector_index import VectorIndex
 from .hybrid_retriever import HybridRetriever
 from .incremental_indexer import IncrementalIndexer
+
+if TYPE_CHECKING:
+    # Only for the type hints: importing it would load PyTorch.
+    from .generator import Generator
 
 # Defaults of the dataset commands, so that search_dataset, answer_dataset
 # and evaluate run one after the other without options: the results of
@@ -137,10 +142,14 @@ class RagCLI:
     Attributes:
         MAX_IDS_SHOWN: How many question ids ``evaluate`` lists before
             summarising the rest.
+        FLUSH_EVERY: ``answer_dataset`` saves the answer cache after this
+            many generated answers (~15 s each), and at the end, even
+            when interrupted.
         SEPARATOR: Line between the sections of the ``evaluate`` report.
     """
 
     MAX_IDS_SHOWN: int = 5
+    FLUSH_EVERY: int = 10
     SEPARATOR: str = "=" * 35
 
     @CliCommand.validated
@@ -517,8 +526,10 @@ class RagCLI:
                 ``bfloat16`` force it, without the memory check (for
                 testing).
             cache: Reuse the results of questions already searched with
-                the same index and retriever (``--cache=False`` to search
-                again).
+                the same index and retriever, and the answers already
+                generated with the same context, from
+                ``index_dir/answer_cache.json`` (``--cache=False`` to
+                search and generate again).
             save_directory: Folder where the StudentSearchResultsAndAnswer
                 file is written, as ``<question_id>.json``.
         """
@@ -528,19 +539,23 @@ class RagCLI:
         hits = indexer.search(query, k)
         indexer.flush()
         # No source found: nothing to ground an answer on, so neither
-        # PyTorch nor the model is loaded.
+        # PyTorch nor the model is loaded (and nothing is cached).
         if hits:
-            try:
-                print("Loading PyTorch...", file=sys.stderr)
-                from .generator import Generator
-            except (ImportError, MemoryError, OSError) as e:
-                raise RagError(
-                    f"Cannot load PyTorch ({type(e).__name__}: {e}). "
-                    "Not enough memory, or the installation is broken: "
-                    "run 'uv sync'.") from e
-            print(f"Loading {Generator.MODEL_NAME}...", file=sys.stderr)
-            generator = Generator(dtype)
-            answer = generator.generate(query, [hit.chunk for hit in hits])
+            chunks = [hit.chunk for hit in hits]
+            answers = (AnswerCache(AnswerCache.file_path(Path(index_dir)))
+                       if cache else None)
+            key = AnswerCache.key(query, chunks)
+            cached = answers.get(key) if answers is not None else None
+            if cached is not None:
+                print("Answer read from the cache", file=sys.stderr)
+                answer = cached
+            else:
+                answer = self._load_generator(dtype).generate(query, chunks)
+                if answers is not None:
+                    # Saved now: an error writing the output below must
+                    # not lose an answer that took seconds to generate.
+                    answers.put(key, answer)
+                    answers.flush()
         else:
             answer = NO_SOURCES
         answered: MinimalAnswer = MinimalAnswer(
@@ -560,6 +575,34 @@ class RagCLI:
                                f"{answered.question_id}.json", output)
         print(f"File saved in '{path}'", file=sys.stderr)
 
+    @staticmethod
+    def _load_generator(dtype: DtypeMode) -> "Generator":
+        """Import PyTorch and load the model, with a message for each.
+
+        The import is inside the method, so the commands that never
+        generate (and an answer read from the cache) never load PyTorch.
+
+        Args:
+            dtype: How to load the model, as in ``answer``.
+
+        Returns:
+            The loaded generator.
+
+        Raises:
+            RagError: PyTorch cannot be imported (not enough memory, or a
+                broken installation), or the model cannot be loaded.
+        """
+        try:
+            print("Loading PyTorch...", file=sys.stderr)
+            from .generator import Generator
+        except (ImportError, MemoryError, OSError) as e:
+            raise RagError(
+                f"Cannot load PyTorch ({type(e).__name__}: {e}). "
+                "Not enough memory, or the installation is broken: "
+                "run 'uv sync'.") from e
+        print(f"Loading {Generator.MODEL_NAME}...", file=sys.stderr)
+        return Generator(dtype)
+
     @CliCommand.validated
     def answer_dataset(
             self,
@@ -569,9 +612,15 @@ class RagCLI:
                 Field(min_length=1)
                 ] = ("data/output/search_results_and_answer/"
                      "UnansweredQuestions"),
-            dtype: DtypeMode = "auto"
+            dtype: DtypeMode = "auto",
+            index_dir: Annotated[str, Field(min_length=1)] = "data/processed",
+            cache: bool = True
             ) -> None:
         """Generate answers for the output of search_dataset.
+
+        With the answer cache, the questions already answered with the
+        same context are not generated again, and the model is only
+        loaded if at least one question is not cached.
 
         Args:
             student_search_results_path: JSON file written by search_dataset
@@ -581,6 +630,12 @@ class RagCLI:
             save_directory: Folder where the StudentSearchResultsAndAnswer
                 file is written, with the same file name as the input.
             dtype: How to load the model, as in ``answer``.
+            index_dir: Folder of the answer cache
+                (``index_dir/answer_cache.json``), the one shared with
+                ``answer`` and ``serve``. Nothing else is read from it.
+            cache: Reuse the answers already generated with the same
+                question and context (``--cache=False`` to generate them
+                all again).
         """
 
         # The input first: a broken file, or a source path outside the
@@ -593,7 +648,9 @@ class RagCLI:
 
         results_list: list[MinimalAnswer] = []
         if results.search_results:
-            results_list = self._answer_all(results, dtype)
+            answers = (AnswerCache(AnswerCache.file_path(Path(index_dir)))
+                       if cache else None)
+            results_list = self._answer_all(results, dtype, answers)
         output = StudentSearchResultsAndAnswer(
             search_results=results_list,
             k=results.k)
@@ -602,15 +659,23 @@ class RagCLI:
         print(f"File saved in '{path}'")
 
     def _answer_all(self, results: StudentSearchResults,
-                    dtype: DtypeMode) -> list[MinimalAnswer]:
-        """Load the model once and answer every question of ``results``.
+                    dtype: DtypeMode,
+                    answers: AnswerCache | None) -> list[MinimalAnswer]:
+        """Answer every question of ``results``, generating only what is
+        not cached.
 
-        Only called when there is at least one question: an empty results
-        file never imports PyTorch.
+        Every context is rebuilt first, so the cached answers are found
+        before anything is loaded: PyTorch and the model are loaded once,
+        and only if a question with sources is not cached. A question
+        without sources gets ``NO_SOURCES``, as in ``answer``. The cache
+        is saved every ``FLUSH_EVERY`` generated answers and when the
+        loop ends, even on Ctrl+C or an error, so an interrupted run
+        keeps its work (a killed process keeps up to the last save).
 
         Args:
             results: The search results, with valid source paths.
             dtype: How to load the model, as in ``answer``.
+            answers: The answer cache, or ``None`` to generate them all.
 
         Returns:
             One MinimalAnswer per question, in the same order.
@@ -618,37 +683,47 @@ class RagCLI:
         Raises:
             RagError: PyTorch or the model cannot be loaded.
         """
-        try:
-            print("Loading PyTorch...", file=sys.stderr)
-            from .generator import Generator
-        except (ImportError, MemoryError, OSError) as e:
-            raise RagError(f"Cannot load PyTorch ({type(e).__name__}: {e}). "
-                           "Not enough memory, or the installation is broken: "
-                           "run 'uv sync'.") from e
-
-        results_list: list[MinimalAnswer] = []
         files: dict[str, str] = {}
-        print(f"Loading {Generator.MODEL_NAME}...", file=sys.stderr)
-        generator = Generator(dtype)
-        for question in tqdm(
-                        results.search_results,
-                        desc="Generating answers",
-                        unit="question"
-                        ):
-            answer = generator.generate(
-                question=question.question,
-                chunks=self._load_chunks(question.retrieved_sources, files)
-            )
+        questions = results.search_results
+        contexts = [self._load_chunks(question.retrieved_sources, files)
+                    for question in questions]
+        keys = [AnswerCache.key(question.question, chunks)
+                for question, chunks in zip(questions, contexts)]
+        texts: list[str | None] = [
+            NO_SOURCES if not chunks
+            else answers.get(key) if answers is not None
+            else None
+            for chunks, key in zip(contexts, keys)]
+        missing = [i for i, text in enumerate(texts) if text is None]
+        if answers is not None:
+            print(f"{len(questions) - len(missing)} of {len(questions)} "
+                  "answers read from the cache", file=sys.stderr)
 
-            results_list.append(
-                MinimalAnswer(
-                    question_id=question.question_id,
-                    question=question.question,
-                    retrieved_sources=question.retrieved_sources,
-                    answer=answer
-                )
-            )
-        return results_list
+        if missing:
+            generator = self._load_generator(dtype)
+            try:
+                for done, i in enumerate(tqdm(missing,
+                                              desc="Generating answers",
+                                              unit="question"), start=1):
+                    answer = generator.generate(questions[i].question,
+                                                contexts[i])
+                    texts[i] = answer
+                    if answers is not None:
+                        answers.put(keys[i], answer)
+                        if done % self.FLUSH_EVERY == 0:
+                            answers.flush()
+            finally:
+                # Also on Ctrl+C or an error: every answer generated so
+                # far is kept for the next run.
+                if answers is not None:
+                    answers.flush()
+
+        # Every None was generated above: all the texts are set now.
+        return [MinimalAnswer(question_id=question.question_id,
+                              question=question.question,
+                              retrieved_sources=question.retrieved_sources,
+                              answer=cast(str, text))
+                for question, text in zip(questions, texts)]
 
     @CliCommand.validated
     def evaluate(
@@ -802,34 +877,46 @@ class RagCLI:
                   Field(min_length=1)] = "data/processed",
               retriever: RetrieverMode = "hybrid",
               dtype: DtypeMode = "auto",
-              cache: bool = True
+              cache: bool = True,
+              raw_dir: Annotated[str, Field(min_length=1)] = "data/raw"
               ) -> None:
         """Start the local HTTP API (bonus 5) until Ctrl+C.
 
         Endpoints: ``/health``, ``/search`` and ``/answer``, with the same
-        JSON as the commands of the same name (nothing is saved to disk);
-        ``/docs`` is an interactive page to try them. The index is loaded
-        now; the model on the first ``/answer``, then kept.
+        JSON as the commands of the same name (nothing is saved to
+        ``data/output``), and ``POST /index``, which re-indexes the
+        changed files of raw_dir and reloads the index; ``/docs`` is an
+        interactive page to try them. The index is loaded now; the model
+        on the first ``/answer``, then kept.
 
         Args:
             host: Address to listen on. The default only accepts
                 connections from this machine.
             port: Port to listen on.
             index_dir: Folder where the index command saved the index.
-            retriever: ``hybrid`` reranks the BM25 results with the vector
-                index (better recall); ``bm25`` uses the words only.
+            retriever: The default of every request: ``hybrid`` reranks
+                the BM25 results with the vector index (better recall);
+                ``bm25`` uses the words only. A request can choose the
+                other one with ``?retriever=``; both share one BM25
+                index in memory.
             dtype: How to load the model. ``auto`` chooses float32 or
                 bfloat16 from the available memory; ``float32`` or
                 ``bfloat16`` force it, without the memory check (for
                 testing).
             cache: Reuse the results of questions already searched with
-                the same index and retriever (``--cache=False`` to search
-                again).
+                the same index and retriever, and the answers already
+                generated with the same context, from
+                ``index_dir/answer_cache.json`` (``--cache=False`` to
+                search and generate again).
+            raw_dir: Corpus folder that ``POST /index`` reads.
         """
         import uvicorn
-        from .api import RagApi
+        from .api import RagApi, RetrieverLoader
 
-        api = RagApi(self._load_retriever(index_dir, retriever, cache),
-                     dtype)
+        answers = (AnswerCache(AnswerCache.file_path(Path(index_dir)))
+                   if cache else None)
+        loader = RetrieverLoader(index_dir, cache)
+        api = RagApi(loader.load(retriever), dtype, answers, index_dir,
+                     raw_dir, loader, retriever)
         print(f"http://{host}:{port}/docs", file=sys.stderr)
         uvicorn.run(api.app, host=host, port=port)

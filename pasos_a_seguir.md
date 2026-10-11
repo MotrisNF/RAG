@@ -21,7 +21,7 @@
 
 - Parte obligatoria y los **cinco bonus** hechos. 1,297 tests, `make lint` limpio.
 - `test_corpus` movido a `tests/test_corpus/` (datasets regenerados con la ruta nueva; excluido de pytest, flake8 y mypy). `data/`, el PDF, `DEVLOG.md` y este fichero están en `.gitignore`.
-- **En curso: caché de respuestas.** 8.0 (decisiones) ✅. **Siguiente: 8.1.**
+- **En curso: caché de respuestas.** 8.0 (decisiones), 8.1 (`AnswerCacheData`) 8.2 (`AnswerCache`, `src/answer_cache.py`) y 8.3 (`answer`; carga del modelo en `RagCLI._load_generator`, compartida con `_answer_all`) ✅. 8.5 (API: `RagApi(answers=...)`, `_cached` / `_remember` / `_generate`, `_answers_lock`) ✅. 8.4 (`answer_dataset`), 8.6 (`index` borra `answer_cache.json`) y `POST /index` en la API ✅. 8.7: README hecho; `make test_answer_dataset` reescrito para cargar Qwen una sola vez (`search_dataset` + `answer_dataset` + impresión pregunta/respuesta/esperada; variables `ANSWER_SEARCH_ARGS`, `ANSWER_ARGS`, `ANSWER_WORK`). Medido `make test_answer` (172 s → 3 s) y metido en el README. `make test_answer_dataset` medido (100 docs: sin caché 1498 s, ~15 s/respuesta; con caché 1 s en total) y en el README. Ejecución cortada a medias comprobada con Qwen (Ctrl+C tras 2 → la siguiente: `2 of 100 answers read from the cache`, barra sobre 98) y en el README. **8.7 terminado.** D4 confirmado por el usuario (2026-10-11): `--full` es un reset de todo, también de las cachés; explicado en el README (decisiones de diseño). Opcional: 8.8 (base común de las cachés).
 
 ---
 
@@ -78,11 +78,11 @@ La clave final: `sha256` de un JSON con `{pregunta, [[ruta, inicio, fin, texto],
 
 ## Pasos
 
-### 8.1 — El modelo `AnswerCacheData` (SIGUIENTE)
-- [ ] En `models.py`, junto a `QueryCache`: `namespace: str`, `entries: dict[str, str]` (clave → respuesta), con docstring y `Attributes:`.
-- [ ] Prueba: JSON de ida y vuelta; un JSON roto da `ValidationError`.
+### 8.1 — El modelo `AnswerCacheData` ✅
+- [x] En `models.py`, junto a `QueryCache`: `namespace: str`, `entries: dict[str, str]` (clave → respuesta), con docstring y `Attributes:`.
+- [x] Prueba: JSON de ida y vuelta; un JSON roto da `ValidationError`.
 
-### 8.2 — La clase `AnswerCache`
+### 8.2 — La clase `AnswerCache` ✅
 Esqueleto (`src/answer_cache.py`):
 
 ```python
@@ -137,32 +137,40 @@ print(len(AnswerCache.namespace()))
 ```
 **Esperado:** `64 True`, `True True`, `64`.
 
-- [ ] Tests (`tests/test_answer_cache.py`): la clave cambia con la pregunta, el orden de los chunks, su texto y su rango, y es la misma en llamadas repetidas; el namespace cambia si cambia `generator.py` (apuntar `GENERATOR_FILE` a un fichero temporal); ida y vuelta a disco; fichero roto, vacío o de otro namespace = caché vacía; `flush` sin cambios no escribe; carpeta sin permiso = aviso; **nunca se importa `src.generator`** (comprobar `sys.modules`).
+- [x] Tests (`tests/test_answer_cache.py`, 31): la clave cambia con la pregunta, el orden de los chunks, su texto y su rango, y es la misma en llamadas repetidas; el namespace cambia si cambia `generator.py` (apuntar `GENERATOR_FILE` a un fichero temporal); ida y vuelta a disco; fichero roto, vacío o de otro namespace = caché vacía; `flush` sin cambios no escribe; carpeta sin permiso = aviso; **nunca se importa `src.generator`** (comprobar `sys.modules`).
 
-### 8.3 — `answer` (CLI)
-- [ ] Tras buscar, si hay `hits` y `--cache`: calcular la clave con `[hit.chunk for hit in hits]`. Acierto → respuesta de la caché, mensaje en stderr (`Answer read from the cache`), **sin importar PyTorch**. Fallo → generar como ahora, `put` y `flush`.
-- [ ] Test: dos `answer` iguales con un generador falso (el truco de `sys.modules` de `test_api.py`) → la segunda no carga el generador; `--cache=False` siempre genera.
+### 8.3 — `answer` (CLI) ✅
+- [x] Tras buscar, si hay `hits` y `--cache`: calcular la clave con `[hit.chunk for hit in hits]`. Acierto → respuesta de la caché, mensaje en stderr (`Answer read from the cache`), **sin importar PyTorch**. Fallo → generar como ahora, `put` y `flush`.
+- [x] Test: dos `answer` iguales con un generador falso (el truco de `sys.modules` de `test_api.py`) → la segunda no carga el generador; `--cache=False` siempre genera.
 
-### 8.4 — `answer_dataset`
-- [ ] Nuevas opciones `--index_dir` (por defecto `data/processed`, solo para la caché) y `--cache` (por defecto `True`), con sus docstrings (D2, D3).
-- [ ] Primero construir los chunks de **todas** las preguntas (ya lo hace `_load_chunks`), calcular sus claves y separar aciertos de fallos.
-- [ ] **Cargar PyTorch y Qwen solo si hay algún fallo.** La barra de progreso, solo sobre los fallos.
-- [ ] Guardar la caché al final (y quizá cada N preguntas, para no perder el trabajo si se corta: decidir).
-- [ ] Test: `--cache=False` siempre genera; todas cacheadas → PyTorch no se importa; mitad y mitad → el generador solo recibe las que faltan; el orden de la salida no cambia.
+### 8.4 — `answer_dataset` ✅
+- [x] Nuevas opciones `--index_dir` (por defecto `data/processed`, solo para la caché) y `--cache` (por defecto `True`), con sus docstrings (D2, D3).
+- [x] Primero construir los chunks de **todas** las preguntas (ya lo hace `_load_chunks`), calcular sus claves y separar aciertos de fallos.
+- [x] **Cargar PyTorch y Qwen solo si hay algún fallo.** (Una pregunta sin fuentes da `NO_SOURCES` sin modelo, como `answer`.) La barra de progreso, solo sobre los fallos.
+- [x] Guardar la caché al final y cada `RagCLI.FLUSH_EVERY` (10) respuestas generadas. **Arreglo (2026-10-11):** un Ctrl+C antes de la 10.ª no guardaba nada; ahora el guardado final va en un `finally` (test `test_interrupted_run_keeps_answers`).
+- [x] Test: `--cache=False` siempre genera; todas cacheadas → PyTorch no se importa; mitad y mitad → el generador solo recibe las que faltan; el orden de la salida no cambia.
 
-### 8.5 — La API (`RagApi`)
-- [ ] `serve` crea la `AnswerCache` en `<index_dir>` y se la pasa a `RagApi`; con `--cache=False`, `None` (D3).
-- [ ] **Un tercer lock** para la caché (es un diccionario compartido entre hilos, como la de búsquedas). Flujo: mirar la caché (lock de caché) → si falla, lock del generador → **volver a mirar** (otro hilo pudo generarla mientras se esperaba) → generar → guardar (lock de caché).
-- [ ] Nunca coger el lock de la caché dentro del del generador al revés: siempre en el mismo orden, para no tener deadlock.
-- [ ] Tests: segunda petición igual → el generador falso no se llama; dos peticiones iguales a la vez → una sola generación; `/search` no espera.
+### 8.5 — La API (`RagApi`) ✅
+- [x] `serve` crea la `AnswerCache` en `<index_dir>` y se la pasa a `RagApi`; con `--cache=False`, `None` (D3).
+- [x] **Un tercer lock** para la caché (es un diccionario compartido entre hilos, como la de búsquedas). Flujo: mirar la caché (lock de caché) → si falla, lock del generador → **volver a mirar** (otro hilo pudo generarla mientras se esperaba) → generar → guardar (lock de caché).
+- [x] Nunca coger el lock de la caché dentro del del generador al revés: siempre en el mismo orden, para no tener deadlock.
+- [x] Tests: segunda petición igual → el generador falso no se llama; dos peticiones iguales a la vez → una sola generación; `/search` no espera.
 
-### 8.6 — `index` borra la caché de respuestas
-- [ ] En `IncrementalIndexer._save`, junto al bucle que borra `query_cache_*.json`, borrar también `AnswerCache.file_path(self._index_dir)` (D4).
-- [ ] Tests en `tests/test_incremental_indexer.py`: sin cambios ("Index up to date") la caché de respuestas sigue ahí; con un fichero cambiado, o con `--full`, se borra.
+### 8.6 — `index` borra la caché de respuestas ✅
+- [x] En `IncrementalIndexer._save`, junto al bucle que borra `query_cache_*.json`, borrar también `AnswerCache.file_path(self._index_dir)` (D4).
+- [x] Tests en `tests/test_incremental_indexer.py`: sin cambios ("Index up to date") la caché de respuestas sigue ahí; con un fichero cambiado, o con `--full`, se borra.
 
-### 8.7 — Medir y documentar
-- [ ] Medir `answer` sin caché y con caché (misma pregunta dos veces), y `answer_dataset` de 10 preguntas dos veces. Lo ejecuta el usuario.
-- [ ] README: fila en *Caching (bonus 4)*; tabla de comandos (`answer_dataset --index_dir --cache`; `index` también borra `answer_cache.json`); decisiones de diseño (clave con el texto y sin `dtype`, namespace = hash de `generator.py`, se borra cuando el índice cambia); limitación (con otro `--dtype` forzado se puede reutilizar una respuesta del otro tipo); tests.
+### 8.6b — `POST /index` en la API ✅ (pedido por el usuario, 2026-10-11)
+- [x] `RagApi(..., index_dir, raw_dir, load_retriever)`; `serve --raw_dir` (por defecto `data/raw`).
+- [x] `POST /index?full=false&max_chunk_size=2000` → `IncrementalIndexer.run`; si el índice cambió, recarga el retriever y empieza una `AnswerCache` vacía. Todo dentro de `_retriever_lock` (las búsquedas esperan; el lock de la caché se coge dentro). Devuelve `IndexSummary` (modelo nuevo: el `IndexReport` sin el texto de los documentos).
+- [x] Sin `index_dir`/`load_retriever` → 503; parámetros malos → 422; GET → 405; `RagError` (corpus que no existe…) → 503 y el servidor sigue con el índice que tenía.
+- [x] Tests: `TestIndex` en `tests/test_api.py` (11).
+- [x] `?retriever=bm25|hybrid` en `/search` y `/answer` (por defecto, el de `serve --retriever`). `RetrieverLoader` (en `api.py`) carga el otro bajo demanda y **comparte un solo `BM25Index`** entre los dos (`index.json` ocupa 35 MB). Tras `/index`, `reset()` y solo se recarga el de por defecto. Sin loader → 503 al pedir el otro. Tests: `TestRetrieverChoice` (7) + `test_index_reloads_both`.
+- [x] README: sección *HTTP API* (endpoint `/index` con `curl -X POST`, `?retriever=`), tabla de `serve` (`--raw_dir`), decisiones (POST porque cambia estado; recarga sin reiniciar; un BM25 compartido).
+
+### 8.7 — Medir y documentar (SIGUIENTE)
+- [x] (`make test_answer`, 10 preguntas: sin caché 172 s, 14–22 s cada una; con caché 3 s, 0,3 s cada una; respuestas idénticas. En el README.) Medir `answer` sin caché y con caché (misma pregunta dos veces), y `answer_dataset` de 10 preguntas dos veces. Lo ejecuta el usuario.
+- [x] README: fila en *Caching (bonus 4)*; tabla de comandos (`answer_dataset --index_dir --cache`; `index` también borra `answer_cache.json`); decisiones de diseño (clave con el texto y sin `dtype`, namespace = hash de `generator.py`, se borra cuando el índice cambia); limitación (con otro `--dtype` forzado se puede reutilizar una respuesta del otro tipo); tests.
 
 ### 8.8 — (Opcional) Una base común para las dos cachés
 - [ ] `CachedRetriever` y `AnswerCache` comparten leer-o-vacío, namespace y escritura atómica. Una clase base (`JsonFileCache`) evitaría el código repetido. Hacerlo **al final**, con los tests de las dos cachés pasando antes y después.

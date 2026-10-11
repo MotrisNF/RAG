@@ -297,6 +297,21 @@ class QueryCache(BaseModel):
     entries: dict[str, list[SearchHit]]
 
 
+class AnswerCacheData(BaseModel):
+    """The answer cache as saved on disk (``answer_cache.json``).
+
+    Attributes:
+        namespace: What produced the answers: the hash of the text of
+            ``generator.py`` (model, prompt, budget, decoding). Answers
+            saved with another namespace are not reused.
+        entries: The answer to each question, by its key: the sha256 of
+            the question and the chunks of its context.
+    """
+
+    namespace: str
+    entries: dict[str, str]
+
+
 class FileStamp(BaseModel):
     """When a corpus file last changed, to detect changes without
     reading it.
@@ -415,3 +430,48 @@ class IndexReport(BaseModel):
     read: CorpusReadResult | None
     chunk_count: int
     fresh_count: int
+
+
+class IndexSummary(BaseModel):
+    """What ``/index`` returns: an ``IndexReport`` without the text of
+    the files read.
+
+    Attributes:
+        up_to_date: True when nothing changed and nothing was written.
+        full: True when the whole corpus was indexed again.
+        new: Files that were not in the index.
+        modified: Files whose stamp changed.
+        deleted: Files that are gone.
+        skipped: Files that could not be read.
+        chunk_count: Chunks in the index now.
+        fresh_count: Chunks tokenized and embedded in this run.
+    """
+
+    up_to_date: bool
+    full: bool
+    new: list[str]
+    modified: list[str]
+    deleted: list[str]
+    skipped: list[str]
+    chunk_count: int
+    fresh_count: int
+
+    @classmethod
+    def from_report(cls, report: IndexReport) -> "IndexSummary":
+        """Summarise a run of ``IncrementalIndexer.run``.
+
+        Args:
+            report: What the run did.
+
+        Returns:
+            The same facts, without the documents read. In a full index,
+            ``new`` lists every file.
+        """
+        return cls(up_to_date=report.read is None, full=report.full,
+                   new=report.changes.new,
+                   modified=report.changes.modified,
+                   deleted=report.changes.deleted,
+                   skipped=[] if report.read is None
+                   else report.read.skipped,
+                   chunk_count=report.chunk_count,
+                   fresh_count=report.fresh_count)
