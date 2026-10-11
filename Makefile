@@ -115,14 +115,18 @@ test_rag_base:
 			--k $(BASE_K) || exit 1; \
 	done
 
-# Same pipeline on a second, independent corpus: the Fly-in project in
-# tests/test_corpus/raw/fly-in, with two handwritten datasets (exact source
-# ranges), so docs and code recall are reported apart, as with the public
-# datasets: dataset_flyin_docs.json (the READMEs and the map files) and
-# dataset_flyin_code.json (src/). Checks that the system is not tuned to
-# vLLM only. Same layout as data/, so every path is an option. The corpus is
-# indexed once, then search_dataset + evaluate run for each dataset.
-#   CORPUS_DATASETS=... dataset file names (default: docs and code)
+# Same pipeline on a second, independent corpus: every project in
+# tests/test_corpus/raw, indexed together, with handwritten datasets (exact
+# source ranges), each reported apart: Fly-in (a drone-routing simulator)
+# with dataset_flyin_docs.json (the READMEs and the map files) and
+# dataset_flyin_code.json (src/), A-Maze-ing (a maze generator and game)
+# with dataset_amazeing_docs.json (its two READMEs and config files) and
+# dataset_amazeing_code.json (mazegen/ and src/), and Dones (Python
+# exercises P0-P10) with dataset_dones_code.json. Checks that the system is
+# not tuned to vLLM only; each project is also noise for the others'
+# questions. Same layout as data/, so every path is an option. The corpus
+# is indexed once, then search_dataset + evaluate run for each dataset.
+#   CORPUS_DATASETS=... dataset file names (default: all five)
 #   CORPUS_K=5          k for search and evaluate (default 10, as the
 #                       moulinette)
 #   CORPUS_CHUNK=500    max_chunk_size (default 2000)
@@ -133,7 +137,9 @@ CORPUS_DATA     := tests/test_corpus
 CORPUS_INDEX    := $(CORPUS_DATA)/processed
 CORPUS_OUTPUT   := $(CORPUS_DATA)/output/search_results/UnansweredQuestions
 CORPUS_ANSWERS  := $(CORPUS_DATA)/output/search_results_and_answer/UnansweredQuestions
-CORPUS_DATASETS ?= dataset_flyin_docs.json dataset_flyin_code.json
+CORPUS_DATASETS ?= dataset_flyin_docs.json dataset_flyin_code.json \
+                   dataset_amazeing_docs.json dataset_amazeing_code.json \
+                   dataset_dones_code.json
 CORPUS_K        ?= 10
 CORPUS_CHUNK    ?= 2000
 ANSWER          ?= 0

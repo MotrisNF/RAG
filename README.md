@@ -8,7 +8,7 @@
 |---|---|---|---|
 | **docs 91.0 %** (target 80 %) · **code 82.8 %** (target 50 %) | ~13 s for 1,969 files (limit 5 min) · ~1.4 s after editing one file | 199 questions in ~5.4 s (limit 90 s for 200), ~0.7 s when cached | ~17–22 s per answer on CPU · 76 % correct or partial on the docs dataset |
 
-On a second project it was never tuned on (the Fly-in simulator, 92 handwritten questions), recall@5 is **75.5 %** on code and **74.4 %** on docs, and a correct source is in the top 10 for **88 %** of the questions (see [A second corpus](#a-second-corpus-fly-in)).
+On three other projects it was never tuned on, indexed together (Fly-in, A-Maze-ing and Dones, 220 handwritten questions), recall@5 is **71–93 %** depending on the dataset (**≈ 80 %** overall), and a correct source is in the top 10 for **≈ 88 %** of the questions (see [Other corpora](#other-corpora-fly-in-a-maze-ing-and-dones)).
 
 ## Table of contents
 
@@ -113,9 +113,9 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 ├── tests/               # pytest suite
 │   ├── data/            #   mini corpus and datasets for `make test_rag`
 │   ├── answer_battery/  #   10 questions with expected answers (`make test_answer`)
-│   └── test_corpus/     #   a second corpus for `make test_corpus`, with the layout of data/
-│       ├── raw/fly-in/  #     the Fly-in project (96 files)
-│       └── datasets/    #     dataset_flyin_docs.json (39 questions), dataset_flyin_code.json (53)
+│   └── test_corpus/     #   other corpora for `make test_corpus`, with the layout of data/
+│       ├── raw/         #     fly-in/ (94 files), amazeing/ (25), Dones/ (83)
+│       └── datasets/    #     5 handwritten datasets: flyin docs/code, amazeing docs/code, dones code
 ├── data/                # the subject's layout, not in the repository (provided at evaluation)
 │   ├── raw/             #   the corpus: data/raw/vllm-0.10.1/...
 │   ├── processed/       #   the index written by `index`
@@ -167,7 +167,7 @@ uv run -m src <command> --help               # options of a command
 | `make test` | The pytest suite |
 | `make test_rag` | index → search_dataset → evaluate on the mini corpus in `tests/data` (variables `TEST_DATASET`, `TEST_K`, `TEST_CHUNK`) |
 | `make test_rag_base` | The same on the real data, as the moulinette runs it: k = 10, chunks of 2000, docs and code datasets |
-| `make test_corpus` | The same as `test_rag_base` on a second corpus, the Fly-in project in `tests/test_corpus/raw/fly-in`: indexed once, then search_dataset → evaluate for two handwritten datasets, docs (39 questions on the READMEs and map files) and code (53 on `src/`), so each recall is reported apart (variables `CORPUS_K`, `CORPUS_CHUNK`, `CORPUS_DATASETS`; `ANSWER=1` also runs `answer_dataset`) |
+| `make test_corpus` | The same as `test_rag_base` on three other projects in `tests/test_corpus/raw` (Fly-in, A-Maze-ing and Dones), indexed together once, then search_dataset → evaluate for five handwritten datasets, each recall reported apart (variables `CORPUS_K`, `CORPUS_CHUNK`, `CORPUS_DATASETS`; `ANSWER=1` also runs `answer_dataset`) |
 | `make test_limits` | Checks the subject's time limits and prints PASS or FAIL: indexing ≤ 5 min (`test_index`) and 200 questions ≤ 90 s (`test_retrieval`) |
 | `make test_limits_cached` | `test_limits` (indexing removes the query cache, so the searches are uncached), then `test_retrieval` again without indexing, with every question read from the cache |
 | `make test_answer` | Runs `answer` on the 10-question battery in `tests/answer_battery` and prints the expected answer after each one |
@@ -320,10 +320,10 @@ $ curl -X POST "http://127.0.0.1:8000/index"
 - **Errors are HTTP status codes, never a traceback.** Invalid parameters (an empty `query` or one of only spaces, `k` of 0 or not a number) give **422** with the reason. Every `RagError` (no index yet, a broken index, a model that does not fit in memory) gives **503** with the same message as the CLI, for example `{"detail": "No index found in 'data/processed'. Run 'index' first."}`. The server keeps running and the next request tries again, so running `index` in another terminal is enough, without restarting it.
 - **Local by default.** The server listens on `127.0.0.1`, so only this machine can reach it. `--host 0.0.0.0` opens it to the network, without any authentication.
 
-### A second corpus
+### Other corpora
 
 ```console
-$ make test_corpus                    # index Fly-in, then search + evaluate its docs and code datasets
+$ make test_corpus                    # index the three projects, then search + evaluate their 5 datasets
 $ make test_corpus CORPUS_CHUNK=500   # the same with another chunk size
 $ make test_corpus ANSWER=1           # also generate the answers with Qwen
 ```
@@ -533,18 +533,44 @@ Times measured with `make test_limits` on a 42 campus computer:
 | `answer`: one question, model load included (float32, ~2,000-token prompt) | ~15–25 s | none |
 | `answer_dataset`: 100 questions, model loaded once | ~17 s per question, ~28 min in total | none |
 
-### A second corpus: Fly-in
+### Other corpora: Fly-in, A-Maze-ing and Dones
 
-Every parameter above was tuned on the vLLM public datasets, so good numbers there could just mean the system is fitted to vLLM. To check it on code it has never seen, `make test_corpus` runs the same pipeline on another project: Fly-in, a drone-routing simulator (`tests/test_corpus/raw/fly-in`: 96 files, 237 K characters; 21 `.py`, 3 `.md`, 72 map `.txt` files).
+Every parameter above was tuned on the vLLM public datasets, so good numbers there could just mean the system is fitted to vLLM. To check it on code it has never seen, `make test_corpus` runs the same pipeline, unchanged, on three other projects, **indexed together** in one index, so each project is also noise for the questions about the others:
 
-The questions were written by hand for this test, in two datasets so each recall is reported apart, as with the public ones:
+| Project | What it is | Files | Characters |
+|---|---|---|---|
+| `fly-in` | A drone-routing simulator | 94 (21 `.py`, 2 `.md`, 71 map `.txt`) | 208 K |
+| `amazeing` | A maze generator and terminal / MiniLibX game, with a reusable `mazegen` package | 25 (19 `.py`, 3 `.md`, 3 `.txt`) | 167 K |
+| `Dones` | Eleven series of Python exercises (classes, exceptions, files, ABCs, packages, pydantic, functional tools) | 83 (82 `.py`, 1 `.txt`) | 111 K |
 
-- **docs**: 39 questions on the two READMEs and the map files (their comments and contents).
-- **code**: 53 questions on `src/` (parser, router, scheduler, drones, constants, pygame view...).
+The questions were written by hand for this test, in five datasets so each recall is reported apart, as with the public ones. Each source range was computed by a script from exact text anchors, checked to be unique in its file and to cover the code or text that answers the question (never counted by hand).
 
-Each source range was computed by a script from the exact text where the answer starts and ends, and checked to be unique in its file. The sources are short (median 254 characters for docs, 425 for code, against 878 in the vLLM code dataset).
+| Dataset | Questions | About | Median source |
+|---|---|---|---|
+| Fly-in docs | 39 | the two READMEs and the map files | 254 chars |
+| Fly-in code | 53 | `src/` (parser, router, scheduler, drones, view...) | 425 chars |
+| A-Maze-ing docs | 25 | the two READMEs, `config.txt`, `highscore.txt` | 601 chars |
+| A-Maze-ing code | 38 | `mazegen/` (generator, solver) and `src/` (config, game modes, terminal, MiniLibX) | 760 chars |
+| Dones code | 65 | the exercises, one question per idea (a default, a rule, an error, a decorator...) | 291 chars |
 
-Default `hybrid` retriever, k = 10:
+Default `hybrid` retriever, k = 10, chunks of 2,000 characters (408 chunks for the three projects; indexing 0.4 s, each `search_dataset` 0.3 s):
+
+| Dataset | Recall@1 | Recall@3 | **Recall@5** | Recall@10 | Found within k = 10 |
+|---|---|---|---|---|---|
+| Fly-in docs | 0.538 | 0.692 | **0.769** | 0.872 | 34 / 39 |
+| Fly-in code | 0.472 | 0.679 | **0.736** | 0.792 | 42 / 53 |
+| A-Maze-ing docs | 0.240 | 0.560 | **0.760** | 0.840 | 21 / 25 |
+| A-Maze-ing code | 0.395 | 0.658 | **0.711** | 0.842 | 32 / 38 |
+| Dones code | 0.623 | 0.931 | **0.931** | 0.954 | 62 / 65 |
+| **All 220 questions** | | | **≈ 0.80** | **≈ 0.88** | 191 / 220 |
+
+- **The system generalises.** Without changing anything, recall@5 is 71–93 % and about 80 % overall, against 91 % / 83 % on vLLM. The drop of about ten points is an honest measure of how much the parameters (`K1`, `B`, `CANDIDATES`, `ALPHA`, the stopwords) are fitted to vLLM. Every code dataset is well above the 50 % the subject asks for vLLM; the docs datasets stay just below its 80 %.
+- **Other projects in the index barely hurt.** Fly-in alone gave 0.744 (docs) and 0.755 (code) at recall@5; with A-Maze-ing and Dones in the same index it gives 0.769 and 0.736. The comparison is not exact (two Fly-in files are gone since), but the difference stays within ±2.5 points.
+- **The right source is found more often than it is ranked first.** Recall@10 is far above recall@1 everywhere (A-Maze-ing docs: 0.24 → 0.84). The retriever reaches the right region but often not at the top. For answering this matters less: the generator receives all ten sources.
+- **Each project fails for its own reason.** Dones is the easiest (0.931): small files, often a single chunk, and distinctive names (`memory_vault`, `spell_reducer`) that BM25 matches at once. A-Maze-ing docs has the lowest recall@1 because its two READMEs (the game's and the `mazegen` package's) describe the same things (perfect mazes, the "42" pattern, the solver, the seeds), so the other README often wins: an ambiguity of the corpus, not of the retriever. A-Maze-ing code has long docstrings that dilute the code, and constants repeated across files (`NO = 1, E = 2...` in the generator and in the drawer).
+- **Read with care.** The datasets are small (with 25 questions, one question is 4 points), and they were written by someone who knows both the code and how the system searches, mixing questions that quote identifiers and questions that paraphrase. Questions written by someone else would be a harder test.
+
+**Chunk size, measured earlier on Fly-in alone** (96 files at the time, 202 chunks at 2,000 characters):
 
 | Chunk size | Chunks | Dataset | Recall@1 | Recall@3 | **Recall@5** | Recall@10 | Found within k = 10 |
 |---|---|---|---|---|---|---|---|
@@ -557,8 +583,7 @@ Default `hybrid` retriever, k = 10:
 
 Indexing took 2.1 s (2,000), 0.8 s (500) and 1.1 s (300); each `search_dataset` 0.6 s.
 
-- **The system generalises.** Without changing anything, code recall@5 is 0.755 (0.828 on vLLM) and docs 0.744 (0.910 on vLLM). Code is well above the subject's 50 %. Docs stay below the 80 % asked for vLLM, but a correct source is in the top 10 for 35 of the 39 questions.
-- **Lower than on vLLM, for expected reasons.** The parameters (`K1`, `B`, `CANDIDATES`, `ALPHA`, the stopwords) were chosen on vLLM. The questions here were written by someone who knows the code, so they often use different words from the source. And the sources are much shorter, which makes the IoU 0.05 overlap harder to reach with a long chunk.
+- **Short sources make it harder.** The Fly-in sources are much shorter than vLLM's (median 254 / 425 characters against 878 in the vLLM code dataset), which makes the IoU 0.05 overlap harder to reach with a long chunk.
 - **Chunk size confirms the trade-off seen on vLLM** (see *Chunk size* below). With 500-character chunks, the top results are more precise (recall@5 +2.5 docs, +3.7 code; recall@1 +5.1 docs), because a short answer is a bigger share of a short chunk. But recall@10 drops (−7.6 docs, −1.9 code): there are three times more chunks competing for the same 10 places, and some answers are split between two chunks.
 - **At 300 characters, docs and code part ways.** Docs reach their best recall@5 (0.795), since the map comments and README bullets they ask about fit in a 300-character chunk. But their recall@10 is the worst (0.795, the same as @5): what is not in the top 5 is not found at all, because the 957 chunks crowd it out. Code gets worse at every k above 1 (@5 0.736, below even 2,000): most functions are longer than 300 characters, so the chunk that contains the words of the question is often not the one that contains the answer. Smaller is not better for code.
 - **2,000 stays the default.** It gives the best recall@10 on both datasets here, it is the best on vLLM, which the moulinette scores, and it gives the generator the most context per chunk.
@@ -836,7 +861,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **The lexical method is always available.** `--retriever bm25` runs the mandatory method alone and never loads the vector index.
 - **Stopwords on the query only**, so the list can change without rebuilding the index.
 - **Default paths, never hard-coded ones.** Every input and output path is a CLI option, as the subject requires. The dataset commands default to the public docs dataset and are chained (`search_dataset` writes where `answer_dataset` and `evaluate` read), so the whole pipeline runs without flags. pydantic does not validate defaults unless asked, so `CliCommand` sets `validate_default=True`: a default path arrives as a `Path`, and a missing default file is a clear argument error instead of a crash inside the command.
-- **A second corpus to check generalisation.** Every parameter was tuned on the vLLM public datasets, which could hide overfitting. `make test_corpus` runs the same pipeline, unchanged, on another project with handwritten docs and code datasets whose source ranges were computed by a script from the exact text, never counted by hand.
+- **Other corpora to check generalisation.** Every parameter was tuned on the vLLM public datasets, which could hide overfitting. `make test_corpus` runs the same pipeline, unchanged, on three other projects indexed together, with five handwritten datasets whose source ranges were computed by a script from exact text anchors, never counted by hand.
 - **Paths relative to the project root**, written exactly as in the corpus (`data/raw/vllm-0.10.1/...`), because the grader compares them verbatim.
 - **FastAPI for the HTTP API**, not the standard library's `http.server`. The project already describes every input and output with pydantic models, and FastAPI validates the requests and serialises the responses with those same models, so the API returns exactly the CLI's JSON without building it by hand. Routing, validation (422) and the `/docs` page come with the framework.
 - **The API keeps everything loaded between requests.** The retriever is loaded when the server starts, and the model on the first `/answer`, so later requests skip the cold start that each CLI command pays.
@@ -880,7 +905,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **Grounded is not always correct.** In one case the model quoted vLLM's own assertion message, which contradicts the condition next to it (`vllm/v1/core/kv_cache_coordinator.py`).
 - **One answer at a time in the API.** Requests to `/answer` are served one after another, so a second user waits for the first answer. That is enough for a local server, and running them in parallel on a CPU would not be faster.
 - **Incremental indexing trusts the stamps.** A change to the chunker or tokenizer code, or a file edited while keeping the same size and modification time, is not detected: `index --full` rebuilds everything. Loading and saving the indexes still grow with the corpus, so even one changed file costs about a second.
-- **Lower recall on unseen code.** On the Fly-in corpus, recall@5 is 74–76 % against 83–91 % on vLLM: the parameters were tuned on vLLM, and the docs dataset stays below the 80 % the subject asks for vLLM.
+- **Lower recall on unseen code.** On the three other projects, recall@5 is 71–93 % (about 80 % overall) against 83–91 % on vLLM: the parameters were tuned on vLLM, and the docs datasets stay below the 80 % the subject asks for vLLM.
 - **The query cache never forgets.** Entries are only dropped when the index or the configuration changes, so the cache file grows with the number of distinct questions.
 - **No authentication in the API.** It listens on `127.0.0.1` by default; `--host 0.0.0.0` exposes it to the network as it is.
 - **A forced `--dtype` can reuse an answer of the other type.** The answer cache ignores `dtype` (see the design decisions). With `--dtype auto` this never matters; forcing another type and wanting a fresh answer needs `--cache=False`.
@@ -916,7 +941,7 @@ I used an AI assistant throughout the project, as a tutor, a reviewer and a pair
   - the coordination of the incremental index (`IncrementalIndexer.run` and `_save`) and the new `index` output;
   - the HTTP API fixes after my first version of `/answer`: the two locks, the `RagError` → 503 handler, the model kept between requests and the validation of blank queries;
   - the default dataset paths and the `validate_default` setting;
-  - the Fly-in datasets, generated by a script from exact text anchors, and the `test_corpus` rule;
+  - the datasets of the other corpora (Fly-in, A-Maze-ing, Dones), generated by a script from exact text anchors, and the `test_corpus` rule;
   - the query stopword list;
   - most of the test suite;
   - several Makefile rules.
