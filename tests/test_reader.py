@@ -13,9 +13,9 @@ import pytest
 from src.exceptions import CorpusError, RagError
 from src.models import CorpusReadResult, Document, FileStamp
 from src.reader import CorpusReader
+from conftest import RealData, needs_answered, needs_corpus
 
 REAL_RAW = CorpusReader.PROJECT_ROOT / "data" / "raw"
-DATASETS = CorpusReader.PROJECT_ROOT / "data" / "datasets"
 NOT_UTF8 = b"\xff\xfe\x00 not utf-8 \x80"
 
 
@@ -413,7 +413,7 @@ def result() -> CorpusReadResult:
     return CorpusReader(REAL_RAW).read()
 
 
-@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="vLLM corpus not present")
+@needs_corpus
 class TestRealCorpus:
     """Checks against the real vLLM corpus in ``data/raw``."""
 
@@ -428,12 +428,12 @@ class TestRealCorpus:
         assert all(d.file_path.startswith("data/raw/vllm-0.10.1/")
                    for d in result.documents)
 
-    @pytest.mark.skipif(not DATASETS.is_dir(), reason="datasets not present")
+    @needs_answered
     def test_dataset_sources_present(self, result: CorpusReadResult) -> None:
         """Every ground-truth source path is one of the read documents."""
         paths = {d.file_path for d in result.documents}
         missing = []
-        for dataset in (DATASETS / "AnsweredQuestions").glob("*.json"):
+        for dataset in RealData.answered_files():
             data = json.loads(dataset.read_text(encoding="utf-8"))
             for question in data["rag_questions"]:
                 for source in question["sources"]:
@@ -441,9 +441,9 @@ class TestRealCorpus:
                         missing.append(source["file_path"])
         assert missing == []
 
-    @pytest.mark.skipif(not DATASETS.is_dir(), reason="datasets not present")
     def test_dataset_offsets(self, result: CorpusReadResult) -> None:
-        """A known ground-truth span points at the expected text."""
+        """A known ground-truth span (of the public docs dataset) points at
+        the expected text."""
         docs = {d.file_path: d.text for d in result.documents}
         text = docs["data/raw/vllm-0.10.1/docs/features/lora.md"]
         assert text[4695:4718] == "### Using API Endpoints"

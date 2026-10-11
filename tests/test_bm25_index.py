@@ -23,9 +23,9 @@ from src.incremental_indexer import IncrementalIndexer
 from src.models import Chunk, SearchHit
 from src.reader import CorpusReader
 from src.tokenizer_bm import Tokenizer
+from conftest import RealData, needs_corpus, needs_unanswered
 
 REAL_RAW = CorpusReader.PROJECT_ROOT / "data" / "raw"
-DATASETS = CorpusReader.PROJECT_ROOT / "data" / "datasets"
 
 
 def make_chunks(*texts: str) -> list[Chunk]:
@@ -708,7 +708,7 @@ def real_index() -> BM25Index:
     return BM25Index.build(FixedSizeChunker(2000).chunk_documents(docs))
 
 
-@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="vLLM corpus not present")
+@needs_corpus
 class TestRealCorpus:
     """Search over the real corpus."""
 
@@ -738,14 +738,14 @@ class TestRealCorpus:
         query = "How do I load a LoRA adapter?"
         assert updated.search(query, 10) == full.search(query, 10)
 
-    @pytest.mark.skipif(not DATASETS.is_dir(), reason="datasets not present")
+    @needs_unanswered
     def test_speed_all_public_questions(self,
                                         real_index: BM25Index) -> None:
-        """Every public question searched well under the subject's limit
+        """Every dataset question searched well under the subject's limit
         (90 s for 200 questions).
         """
         questions = []
-        for path in (DATASETS / "UnansweredQuestions").glob("*.json"):
+        for path in RealData.unanswered_files():
             data = json.loads(path.read_text(encoding="utf-8"))
             questions += [q["question"] for q in data["rag_questions"]]
         start = time.perf_counter()

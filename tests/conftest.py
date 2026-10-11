@@ -5,6 +5,9 @@ test writes into the project's ``data/output``.
 so ``index`` and the hybrid search run in milliseconds and without
 the Hugging Face cache. Outputs saved to a relative folder (the defaults
 of ``search`` and ``answer``) go under the test's ``tmp_path`` instead.
+
+``RealData`` tells the tests about the real data, which is not in the
+repository: tests that need it are skipped when it is missing.
 """
 import functools
 import re
@@ -19,6 +22,60 @@ from pydantic import BaseModel
 from src.commands import RagCLI
 from src.static_encoder import StaticEncoder
 from src.vector_index import VectorIndex
+
+
+class RealData:
+    """The data a fresh clone does not have: the vLLM corpus and the
+    question datasets.
+
+    Their folders always exist (``.gitkeep`` files keep the layout the
+    subject asks for), so the tests check what is inside them. The
+    datasets are found by extension, never by name: the evaluation may
+    bring other datasets than the public ones.
+
+    Attributes:
+        DATA: The project's ``data`` folder.
+        CORPUS: The vLLM corpus, ``data/raw/vllm-0.10.1``.
+        UNANSWERED: Folder of the datasets without answers.
+        ANSWERED: Folder of the datasets with answers and sources.
+    """
+
+    DATA = Path(__file__).resolve().parent.parent / "data"
+    CORPUS = DATA / "raw" / "vllm-0.10.1"
+    UNANSWERED = DATA / "datasets" / "UnansweredQuestions"
+    ANSWERED = DATA / "datasets" / "AnsweredQuestions"
+
+    @classmethod
+    def has_corpus(cls) -> bool:
+        """True when the vLLM corpus is in ``data/raw``."""
+        return cls.CORPUS.is_dir()
+
+    @classmethod
+    def unanswered_files(cls) -> list[Path]:
+        """Every ``.json`` dataset without answers, sorted."""
+        return sorted(cls.UNANSWERED.glob("*.json"))
+
+    @classmethod
+    def answered_files(cls) -> list[Path]:
+        """Every ``.json`` dataset with answers, sorted."""
+        return sorted(cls.ANSWERED.glob("*.json"))
+
+    @classmethod
+    def dataset_names(cls) -> list[str]:
+        """Names of the datasets present in both folders, sorted."""
+        return sorted({path.name for path in cls.unanswered_files()}
+                      & {path.name for path in cls.answered_files()})
+
+
+needs_corpus = pytest.mark.skipif(
+    not RealData.has_corpus(),
+    reason="vLLM corpus not present (data/raw/vllm-0.10.1)")
+needs_answered = pytest.mark.skipif(
+    not RealData.answered_files(),
+    reason="no answered dataset in data/datasets/AnsweredQuestions")
+needs_unanswered = pytest.mark.skipif(
+    not RealData.unanswered_files(),
+    reason="no dataset in data/datasets/UnansweredQuestions")
 
 
 class FakeEncoder:

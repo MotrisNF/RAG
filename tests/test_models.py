@@ -18,8 +18,8 @@ from src.models import (
     StudentSearchResultsAndAnswer,
     UnansweredQuestion,
 )
+from conftest import RealData, needs_answered, needs_unanswered
 
-DATASETS = Path(__file__).resolve().parent.parent / "data" / "datasets"
 SOURCE = {
     "file_path": "data/raw/vllm-0.10.1/docs/features/lora.md",
     "first_character_index": 4695,
@@ -123,40 +123,39 @@ class TestRagDataset:
             RagDataset.model_validate_json('{"rag_questions": [,]}')
 
 
-@pytest.mark.skipif(not DATASETS.is_dir(), reason="datasets not present")
+@needs_unanswered
 class TestRealDatasets:
-    """The public datasets shipped with the subject."""
+    """The question datasets in ``data/datasets``, whatever their names
+    (the public ones, or the ones brought to the evaluation)."""
 
-    @pytest.mark.parametrize("name", ["dataset_docs_public.json",
-                                      "dataset_code_public.json"])
-    def test_unanswered_valid(self, name: str) -> None:
+    @pytest.mark.parametrize("path", RealData.unanswered_files(),
+                             ids=lambda path: path.name)
+    def test_unanswered_valid(self, path: Path) -> None:
         """Every unanswered dataset validates."""
-        path = DATASETS / "UnansweredQuestions" / name
         dataset = RagDataset.model_validate_json(
             path.read_text(encoding="utf-8"))
         assert len(dataset.rag_questions) > 0
 
-    @pytest.mark.parametrize("name", ["dataset_docs_public.json",
-                                      "dataset_code_public.json"])
-    def test_answered_valid(self, name: str) -> None:
+    @needs_answered
+    @pytest.mark.parametrize("path", RealData.answered_files(),
+                             ids=lambda path: path.name)
+    def test_answered_valid(self, path: Path) -> None:
         """Every answered entry is parsed as AnsweredQuestion."""
-        path = DATASETS / "AnsweredQuestions" / name
         dataset = RagDataset.model_validate_json(
             path.read_text(encoding="utf-8"))
         assert all(isinstance(q, AnsweredQuestion)
                    for q in dataset.rag_questions)
 
-    @pytest.mark.parametrize("name", ["dataset_docs_public.json",
-                                      "dataset_code_public.json"])
+    @pytest.mark.parametrize("name", RealData.dataset_names())
     def test_ids_match(self, name: str) -> None:
-        """Unanswered and answered datasets list the same questions."""
-        def ids(folder: str) -> list[str]:
+        """A dataset in both folders lists the same questions in both."""
+        def ids(folder: Path) -> list[str]:
             """Question ids of the dataset in ``folder``."""
-            path = DATASETS / folder / name
+            path = folder / name
             data = RagDataset.model_validate_json(
                 path.read_text(encoding="utf-8"))
             return [q.question_id for q in data.rag_questions]
-        assert ids("UnansweredQuestions") == ids("AnsweredQuestions")
+        assert ids(RealData.UNANSWERED) == ids(RealData.ANSWERED)
 
 
 class TestSearchResults:

@@ -7,6 +7,7 @@ import pytest
 from src.chunker import BaseChunker, FixedSizeChunker, MdChunker, PyChunker
 from src.models import Chunk, Document, MinimalSource
 from src.reader import CorpusReader
+from conftest import needs_corpus
 
 REAL_RAW = CorpusReader.PROJECT_ROOT / "data" / "raw"
 
@@ -248,7 +249,7 @@ def docs() -> list[Document]:
     return CorpusReader(REAL_RAW).read().documents
 
 
-@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="vLLM corpus not present")
+@needs_corpus
 class TestRealCorpus:
     """The whole vLLM corpus, chunked like ``index`` does."""
 
@@ -329,7 +330,7 @@ class TestMdChunker:
         Invariants.check(doc, MdChunker(size).chunk_document(doc), size)
 
 
-@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="vLLM corpus not present")
+@needs_corpus
 class TestMdChunkerRealCorpus:
     """MdChunker on every Markdown file of the vLLM corpus."""
 
@@ -528,7 +529,7 @@ class TestPyChunker:
         Invariants.check(doc, PyChunker(size).chunk_document(doc), size)
 
 
-@pytest.mark.skipif(not REAL_RAW.is_dir(), reason="vLLM corpus not present")
+@needs_corpus
 class TestPyChunkerRealCorpus:
     """PyChunker on every Python file of the vLLM corpus."""
 

@@ -356,7 +356,13 @@ class TestErrors:
 
 @pytest.mark.skipif(not ANSWERED.is_dir(), reason="datasets not present")
 class TestMatchesMoulinette:
-    """Real search results give the moulinette's exact numbers."""
+    """Real search results give the moulinette's exact numbers.
+
+    ``tests/data/search_results_{docs,code}.json`` are search results
+    saved once and scored by the moulinette against the public datasets,
+    so the expected numbers only hold for those two datasets: each case
+    is skipped when its public dataset is not in ``data/datasets``.
+    """
 
     @pytest.mark.parametrize("name, expected", [
         ("docs", {1: 0.61, 3: 0.78, 5: 0.85, 10: 0.88}),
@@ -367,12 +373,14 @@ class TestMatchesMoulinette:
         """Same recall@1/3/5/10 as ``moulinette
         evaluate_student_search_results``.
         """
+        dataset = ANSWERED / f"dataset_{name}_public.json"
+        if not dataset.is_file():
+            pytest.skip(f"public dataset not present ({dataset.name})")
         found = StudentSearchResults.model_validate_json(
             (DATA / f"search_results_{name}.json").read_text(
                 encoding="utf-8"))
         truth = RagDataset.model_validate_json(
-            (ANSWERED / f"dataset_{name}_public.json").read_text(
-                encoding="utf-8"))
+            dataset.read_text(encoding="utf-8"))
         report = Evaluator().evaluate(found, truth, 10)
         assert report.recall == pytest.approx(expected)
         assert report.missing == []

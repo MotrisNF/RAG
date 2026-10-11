@@ -6,7 +6,6 @@ check the exit code and what is printed on stderr.
 import json
 import sys
 import uuid
-from collections.abc import Collection
 from pathlib import Path
 
 import fire
@@ -18,8 +17,7 @@ from src.exceptions import CorpusError
 from src.models import Chunk, StudentSearchResults
 from src.reader import CorpusReader
 
-DOCS_DATASET = "data/datasets/UnansweredQuestions/dataset_docs_public.json"
-REAL_RAW = CorpusReader.PROJECT_ROOT / "data" / "raw"
+MINI_RAW = CorpusReader.PROJECT_ROOT / "tests" / "data" / "raw"
 
 
 class Runner:
@@ -79,11 +77,9 @@ def runner(monkeypatch: pytest.MonkeyPatch,
 class TestSuccess:
     """Valid commands finish without exiting with an error."""
 
-    @pytest.mark.skipif(not REAL_RAW.is_dir(),
-                        reason="vLLM corpus not present")
     def test_exit_zero(self, runner: Runner, tmp_path: Path) -> None:
         """Exit code 0 and no error message (stderr may hold tqdm bars)."""
-        code, err = runner.run("index", "--raw_dir", str(REAL_RAW),
+        code, err = runner.run("index", "--raw_dir", str(MINI_RAW),
                                "--index_dir", str(tmp_path))
         assert code == 0
         for word in ("Error", "error", "Invalid", "Traceback"):
@@ -324,11 +320,10 @@ class TestIndex:
     Every test saves into ``tmp_path``, never into ``data/processed``.
     """
 
-    @pytest.mark.skipif(not REAL_RAW.is_dir(),
-                        reason="vLLM corpus not present")
     def test_summary(self, runner: Runner, tmp_path: Path) -> None:
-        """It reports how many files were read and of which types."""
-        code, out, err = runner.run_full("index", "--raw_dir", str(REAL_RAW),
+        """It reports how many files were read and of which types (the
+        mini corpus has the three)."""
+        code, out, err = runner.run_full("index", "--raw_dir", str(MINI_RAW),
                                          "--index_dir", str(tmp_path))
         assert code == 0
         assert out.startswith("Read ")
@@ -336,12 +331,10 @@ class TestIndex:
         assert "Skipped" not in out
         assert "Reading corpus" in err
 
-    @pytest.mark.skipif(not REAL_RAW.is_dir(),
-                        reason="vLLM corpus not present")
     def test_chunk_size_received(self, runner: Runner,
                                  tmp_path: Path) -> None:
         """``--max_chunk_size`` reaches the command."""
-        _, out, _ = runner.run_full("index", "--raw_dir", str(REAL_RAW),
+        _, out, _ = runner.run_full("index", "--raw_dir", str(MINI_RAW),
                                     "--max_chunk_size", "500",
                                     "--index_dir", str(tmp_path))
         assert "(max 500 characters)" in out
@@ -525,22 +518,24 @@ class TestUnknownCommand:
 class TestCommandNeverRuns:
     """Malformed command lines stop BEFORE the command runs.
 
-    ``CorpusReader.read`` is replaced by a spy: ``index`` must not touch
-    the corpus in any of these cases.
+    ``CorpusReader._checked_files`` is replaced by a spy: it is the first
+    contact with the corpus (``stamps`` and ``read`` both start with it),
+    so ``index`` must never reach it in any of these cases. A command
+    that does reach it stops there, before writing anything into
+    ``data/processed``, whether or not the corpus is present.
     """
 
     @pytest.fixture
     def reads(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-        """Record every call to ``CorpusReader.read``."""
+        """Record every time ``index`` reaches the corpus."""
         calls: list[str] = []
 
-        def spy(self: CorpusReader,
-                only: Collection[str] | None = None) -> None:
-            """Record the call and fail if the corpus is read."""
+        def spy(self: CorpusReader) -> list[Path]:
+            """Record the call and stop the command there."""
             calls.append("read")
-            raise AssertionError("the corpus was read")
+            raise AssertionError("the corpus was reached")
 
-        monkeypatch.setattr(CorpusReader, "read", spy)
+        monkeypatch.setattr(CorpusReader, "_checked_files", spy)
         return calls
 
     def test_unknown_option(self, runner: Runner, reads: list[str]) -> None:

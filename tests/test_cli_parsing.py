@@ -2,7 +2,8 @@
 
 Each test calls Fire exactly as the terminal would, passing the arguments
 as a list. They only check parsing and validation, not what each command
-does.
+does. They use the mini corpus and datasets in ``tests/data``, which are
+in the repository, so they never depend on the real data.
 """
 import json
 from pathlib import Path
@@ -10,12 +11,14 @@ from pathlib import Path
 import fire
 import pytest
 from src.bm25_index import BM25Index
-from src.commands import RagCLI
+from src.commands import (DATASET_ANSWERS, DATASET_QUESTIONS, SEARCH_RESULTS,
+                          RagCLI)
 from src.exceptions import ArgError
 from src.models import Chunk
 
-DOCS_DATASET = "data/datasets/UnansweredQuestions/dataset_docs_public.json"
-DOCS_ANSWERED = "data/datasets/AnsweredQuestions/dataset_docs_public.json"
+MINI_RAW = "tests/data/raw"
+DOCS_DATASET = "tests/data/datasets/UnansweredQuestions/dataset_mini.json"
+DOCS_ANSWERED = "tests/data/datasets/AnsweredQuestions/dataset_mini.json"
 MISSING_FILE = "does_not_exist.json"
 A_DIRECTORY = "data"
 
@@ -26,7 +29,7 @@ class TestValidArguments:
     @pytest.mark.parametrize("command", [
         ["index"],
         ["index", "--max_chunk_size", "500"],
-        ["index", "--raw_dir", "data/raw"],
+        ["index", "--raw_dir", MINI_RAW],
         ["search", "How to use LoRA?"],
         ["search", "How to use LoRA?", "--k", "5"],
         ["search", "How to use LoRA?", "--k=5"],
@@ -50,6 +53,7 @@ class TestValidArguments:
 
         Commands not written yet raise ``NotImplementedError`` from their
         body: reaching the body means validation already passed. ``index``
+        reads the mini corpus (unless the command names a folder) and
         saves into a temporary folder, never into ``data/processed``, and
         ``search_dataset`` writes its results into a temporary folder too.
         ``evaluate`` and ``answer_dataset`` get a small valid results file
@@ -65,6 +69,8 @@ class TestValidArguments:
         command = [str(tmp_path / arg) if arg.startswith("folder/") else arg
                    for arg in command]
         if command[0] == "index":
+            if "--raw_dir" not in command:
+                command = [*command, "--raw_dir", MINI_RAW]
             command = [*command, "--index_dir", str(tmp_path)]
         if command[0] == "search_dataset":
             if "--save_directory" not in command:
@@ -165,18 +171,14 @@ class TestDefaultPaths:
     """
 
     @pytest.mark.parametrize("command, option, default", [
-        (["search_dataset"], "--dataset_path",
-         "data/datasets/UnansweredQuestions/dataset_docs_public.json"),
+        (["search_dataset"], "--dataset_path", str(DATASET_QUESTIONS)),
         (["answer_dataset"], "--student_search_results_path",
-         "data/output/search_results/UnansweredQuestions/"
-         "dataset_docs_public.json"),
+         str(SEARCH_RESULTS)),
         (["evaluate", "--dataset_path", str(Path.cwd() / DOCS_ANSWERED)],
-         "--student_search_results_path",
-         "data/output/search_results/UnansweredQuestions/"
-         "dataset_docs_public.json"),
+         "--student_search_results_path", str(SEARCH_RESULTS)),
         (["evaluate", "--student_search_results_path",
           str(Path.cwd() / DOCS_DATASET)], "--dataset_path",
-         "data/datasets/AnsweredQuestions/dataset_docs_public.json"),
+         str(DATASET_ANSWERS)),
     ])
     def test_missing_default_file(self, command: list[str], option: str,
                                   default: str, tmp_path: Path,
@@ -193,15 +195,16 @@ class TestDefaultPaths:
     def test_default_used(self, tmp_path: Path,
                           monkeypatch: pytest.MonkeyPatch,
                           capsys: pytest.CaptureFixture[str]) -> None:
-        """``evaluate`` with no option reads the two default files."""
+        """``evaluate`` with no option reads the two default files (here
+        the mini dataset, copied to the default paths)."""
         root = Path.cwd()
         monkeypatch.chdir(tmp_path)
-        for source in (DOCS_DATASET, DOCS_ANSWERED):
-            target = tmp_path / source
+        for source, default in ((DOCS_DATASET, DATASET_QUESTIONS),
+                                (DOCS_ANSWERED, DATASET_ANSWERS)):
+            target = tmp_path / default
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((root / source).read_bytes())
-        results = (tmp_path / "data/output/search_results/"
-                   "UnansweredQuestions/dataset_docs_public.json")
+        results = tmp_path / SEARCH_RESULTS
         results.parent.mkdir(parents=True)
         dataset = json.loads((root / DOCS_DATASET).read_text("utf-8"))
         results.write_text(json.dumps({"k": 10, "search_results": [
