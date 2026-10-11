@@ -53,7 +53,10 @@ class BaseChunker(ABC):
             The chunks of all the documents, in order.
         """
         chunk_list: list[Chunk] = []
-        for doc in tqdm(docs, desc="Chunking files", unit="file"):
+        # No bar for an empty list (an incremental index that only
+        # changed files of the other type).
+        for doc in tqdm(docs, desc="Chunking files", unit="file",
+                        disable=not docs):
             chunk_list.extend(self.chunk_document(doc))
 
         return chunk_list

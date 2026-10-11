@@ -137,9 +137,11 @@ class BM25Index(Retriever):
             if moved:
                 postings[term] = moved
 
+        # No bar when only deletions changed the index: nothing to tokenize.
         for chunk_id in tqdm(plan.fresh_ids,
                              desc="Tokenizing chunks",
-                             unit="chunk"):
+                             unit="chunk",
+                             disable=not plan.fresh_ids):
             tokens = self._chunk_tokens(self._tokenizer,
                                         plan.chunks[chunk_id])
             lengths[chunk_id] = len(tokens)

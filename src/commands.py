@@ -281,6 +281,9 @@ class RagCLI:
             VectorIndexError: The vector index is not valid or does not
                 match the BM25 index.
         """
+        # With the query cache this runs inside the progress bar loop
+        # (first uncached question): tqdm.write keeps it on its own line.
+        tqdm.write("Loading the index...", file=sys.stderr)
         bm25 = BM25Index.load(Path(index_dir))
         if retriever == "bm25":
             return bm25
@@ -486,7 +489,7 @@ class RagCLI:
         results_list: list[MinimalSearchResults] = []
         for question in tqdm(
                         dataset.rag_questions,
-                        desc="Searching in the index",
+                        desc="Searching",
                         unit="question"
                         ):
             results_list.append(self._search_question(indexer, question, k))
@@ -550,7 +553,10 @@ class RagCLI:
                 print("Answer read from the cache", file=sys.stderr)
                 answer = cached
             else:
-                answer = self._load_generator(dtype).generate(query, chunks)
+                generator = self._load_generator(dtype)
+                # One model call: no progress bar, so say what is running.
+                print("Generating the answer...", file=sys.stderr)
+                answer = generator.generate(query, chunks)
                 if answers is not None:
                     # Saved now: an error writing the output below must
                     # not lose an answer that took seconds to generate.

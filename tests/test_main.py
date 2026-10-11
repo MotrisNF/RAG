@@ -124,11 +124,14 @@ class TestSearch:
     def test_output_is_student_search_results(self, runner: Runner,
                                               index_dir: Path) -> None:
         """stdout is exactly one valid StudentSearchResults JSON; stderr
-        only says where it was saved."""
+        only has the status message of the index load and where the
+        file was saved."""
         code, results, err = self.search(runner, index_dir, "lora adapter",
                                          "--k", "2")
         assert code == 0
-        assert err.startswith("File saved in '") and err.count("\n") == 1
+        *status, saved = err.splitlines()
+        assert saved.startswith("File saved in '")
+        assert status == ["Loading the index..."]
         assert results.k == 2
         [entry] = results.search_results
         assert entry.question == "lora adapter"

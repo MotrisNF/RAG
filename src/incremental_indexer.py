@@ -7,6 +7,7 @@ modified ones; the chunks of modified and deleted files leave both
 indexes. Without a usable manifest or index, or with ``--full``, the
 whole corpus is indexed again.
 """
+import sys
 from pathlib import Path
 from typing import get_args
 
@@ -143,6 +144,7 @@ class IncrementalIndexer:
             PathError: A file cannot be written or removed.
             RagError: The tokenizer of the model cannot be written.
         """
+        print("Saving the index...", file=sys.stderr)
         bm25.save(self._index_dir)
         vectors.save(self._index_dir)
         # Results cached with the old index are never reused (the namespace
@@ -190,7 +192,10 @@ class IncrementalIndexer:
         """
         stamps = self._reader.stamps()
         manifest = None if full else self._load_manifest()
-        old = None if manifest is None else self._load_indexers()
+        old = None
+        if manifest is not None:
+            print("Loading the saved index...", file=sys.stderr)
+            old = self._load_indexers()
 
         if manifest is None or old is None:
             changes = self._diff({}, stamps)

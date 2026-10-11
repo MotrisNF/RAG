@@ -178,7 +178,10 @@ class CorpusReader:
             files = [file for file in files
                      if self._relative_path(file) in wanted]
 
-        for file in tqdm(files, desc="Reading corpus", unit="file"):
+        # No bar when there is nothing to read (an incremental index
+        # with only deleted files).
+        for file in tqdm(files, desc="Reading corpus", unit="file",
+                         disable=not files):
             document = self._read_file(file)
             if document is not None:
                 files_read.append(document)

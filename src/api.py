@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Annotated
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import StringConstraints
+from tqdm import tqdm
 
 from .answer_cache import AnswerCache
 from .base_retriever import Retriever
@@ -66,6 +67,7 @@ class RetrieverLoader:
     def _shared_bm25(self) -> BM25Index:
         """The BM25 index, loaded the first time one is needed."""
         if self._bm25 is None:
+            tqdm.write("Loading the index...", file=sys.stderr)
             self._bm25 = BM25Index.load(Path(self._index_dir))
         return self._bm25
 
@@ -342,7 +344,9 @@ class RagApi:
         with self._generator_lock:
             answer = self._cached(key)
             if answer is None:
-                answer = self._get_generator().generate(query, chunks)
+                generator = self._get_generator()
+                print("Generating an answer...", file=sys.stderr)
+                answer = generator.generate(query, chunks)
                 self._remember(key, answer)
         return answer
 
