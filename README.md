@@ -2,7 +2,7 @@
 
 # RAG against the machine
 
-> A Retrieval-Augmented Generation system that answers questions about the vLLM codebase. It runs entirely on CPU, with a BM25 search engine written from scratch, a semantic re-ranker, a small local language model (Qwen3-0.6B), a query cache, incremental indexing and a local HTTP API.
+> A Retrieval-Augmented Generation system that answers questions about the vLLM codebase. It runs entirely on CPU, with a BM25 search engine written from scratch, a semantic re-ranker, a small local language model (Qwen3-0.6B), query and answer caches, incremental indexing and a local HTTP API.
 
 | Retrieval (recall@5, moulinette) | Indexing | Retrieval speed | Generation |
 |---|---|---|---|
@@ -58,7 +58,7 @@ All five bonuses are implemented. The system was also measured on a second, inde
 | Bonus 4: caching | ✅ Cold start: the embedding model is saved with the index and run with numpy, so searching never imports PyTorch. Repeated queries: results are cached on disk, so a repeated search loads no index at all. Repeated answers: an answer already generated for the same question and sources is read from disk without importing PyTorch, in `answer`, `answer_dataset` and the API (`--cache=False` turns both caches off) |
 | Bonus 5: local HTTP API | ✅ `serve` starts a FastAPI server on `127.0.0.1` with `/health`, `/search` and `/answer`, which return the same JSON as the CLI, plus `POST /index` to re-index without restarting. Each request can choose `bm25` or `hybrid`. The model is loaded on the first `/answer` that is not cached and kept for the next ones |
 | Robustness | ✅ No traceback on degenerate input (empty or blank query, `k` of 0, negative or not a number, missing files, malformed JSON, a chunk size above 2,000, a missing corpus folder): each one ends with a clear message and exit code 1 |
-| Quality gates | ✅ `flake8` and `mypy --strict` clean, docstrings on every module, class and function, 1,297 pytest tests |
+| Quality gates | ✅ `flake8` and `mypy --strict` clean, docstrings on every module, class and function, about 1,370 pytest tests |
 
 ---
 
@@ -94,6 +94,14 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 
 ```
 .
+├── README.md
+├── Makefile             # install, run, debug, lint, test and pipeline rules
+├── pyproject.toml       # dependencies (CPU-only PyTorch index), mypy and pytest settings
+├── uv.lock              # exact versions, for `uv sync`
+├── .python-version      # Python version used by uv
+├── .flake8              # flake8 settings (excludes data/ and the test corpora)
+├── .gitignore
+├── .vscode/             # editor settings (Pylance skips data/ and tests/data/)
 ├── src/                 # the Python package, run with: uv run python -m src <command>
 │   ├── __main__.py      # entry point: Fire, error handling and exit codes
 │   ├── commands.py      # RagCLI: the six commands and serve
@@ -110,7 +118,7 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 │   ├── evaluator.py     # recall@k, same rules as the moulinette
 │   ├── models.py        # pydantic models
 │   └── exceptions.py    # RagError hierarchy
-├── tests/               # pytest suite
+├── tests/               # pytest suite: conftest.py and 19 test_*.py files
 │   ├── data/            #   mini corpus and datasets for `make test_rag`
 │   ├── answer_battery/  #   10 questions with expected answers (`make test_answer`)
 │   └── test_corpus/     #   other corpora for `make test_corpus`, with the layout of data/
@@ -121,9 +129,6 @@ export HF_HOME=/sgoinfre/students/$USER/hf
 │   ├── processed/       #   the index written by `index`
 │   ├── datasets/        #   UnansweredQuestions/ and AnsweredQuestions/
 │   └── output/          #   search_results/ and search_results_and_answer/, scoped by dataset
-├── Makefile
-├── pyproject.toml
-└── uv.lock
 ```
 
 `data/` is not part of the repository (`.gitignore`): the corpus and the datasets are provided at evaluation, and the commands create the index and output folders they write to. Every path is a CLI option, and the defaults follow the subject's layout.
@@ -293,7 +298,7 @@ $ uv run -m src serve                       # or: make serve
 http://127.0.0.1:8000/docs
 ```
 
-The index is loaded at start-up. Open `http://127.0.0.1:8000/docs` for an interactive page that tries every endpoint from the browser, or call them from any other program, for example `curl` in another terminal:
+With the cache on (the default), the index is loaded by the first search that is not cached, and then kept in memory; with `--cache=False`, at start-up. Open `http://127.0.0.1:8000/docs` for an interactive page that tries every endpoint from the browser, or call them from any other program, for example `curl` in another terminal:
 
 ```console
 $ curl "http://127.0.0.1:8000/health"
@@ -864,7 +869,7 @@ Answers cannot be scored automatically, so they were judged by hand. Score: ✅ 
 - **Other corpora to check generalisation.** Every parameter was tuned on the vLLM public datasets, which could hide overfitting. `make test_corpus` runs the same pipeline, unchanged, on three other projects indexed together, with five handwritten datasets whose source ranges were computed by a script from exact text anchors, never counted by hand.
 - **Paths relative to the project root**, written exactly as in the corpus (`data/raw/vllm-0.10.1/...`), because the grader compares them verbatim.
 - **FastAPI for the HTTP API**, not the standard library's `http.server`. The project already describes every input and output with pydantic models, and FastAPI validates the requests and serialises the responses with those same models, so the API returns exactly the CLI's JSON without building it by hand. Routing, validation (422) and the `/docs` page come with the framework.
-- **The API keeps everything loaded between requests.** The retriever is loaded when the server starts, and the model on the first `/answer`, so later requests skip the cold start that each CLI command pays.
+- **The API keeps everything loaded between requests.** The index is loaded once (at start-up, or by the first search that is not cached when the cache is on) and the model on the first `/answer` that is not cached, so later requests skip the cold start that each CLI command pays.
 - **Two locks (mutexes) in the API.** FastAPI runs each request in its own thread, so two requests can arrive at once. One lock lets a single search (with its cache write) run at a time, because two writers would corrupt the query cache. The other loads the model once and generates one answer at a time, because two generations at once would double the memory. They are never held together, so a `/search` does not wait for an answer being generated, and they cannot deadlock. A third lock guards the answer cache; it is only taken alone or inside one of the other two, never the other way round. A request that waited for the model checks the answer cache again before generating, so identical requests at the same time generate once.
 - **Lazy import and single load of Qwen.** Only `answer` and `answer_dataset` pay for PyTorch, and only once per command.
 - **float32 on CPU when it fits.** It reads the prompt ~3× faster than bfloat16. The type is chosen before loading, so a smaller machine gets a slower answer instead of a killed process.

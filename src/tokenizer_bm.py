@@ -32,6 +32,7 @@ class Tokenizer:
 
     PATTERN = re.compile(r"[a-z0-9]+")
     SNAKE_PATTERN = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)+")
+    SPANISH_PATERN = re.compile(r"[a-z0-9áéíóúüñ]+")
     STOPWORDS: frozenset[str] = frozenset({
         # Question words and auxiliaries
         "what", "why", "where", "when", "which", "who", "how",
